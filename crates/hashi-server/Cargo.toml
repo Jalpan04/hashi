@@ -1,0 +1,7 @@
+[package]
+name = "hashi-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hashi-core = { path = "../hashi-core" }
