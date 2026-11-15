@@ -1,0 +1,7 @@
+target/
+node_modules/
+dist/
+*.log
+sqlite_mcp_server.db
+.DS_Store
+Thumbs.db
