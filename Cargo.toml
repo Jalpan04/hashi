@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/hashi-core",
+    "crates/hashi-batch",
+    "crates/hashi-server",
+    "plugins/tauri-plugin-hashi-native",
+    "apps/desktop/src-tauri",
+    "apps/mobile/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Hashi Author"]
+license = "MIT"
