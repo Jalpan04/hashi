@@ -1,0 +1,9 @@
+[package]
+name = "hashi-desktop"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hashi-core = { path = "../../../crates/hashi-core" }
+hashi-batch = { path = "../../../crates/hashi-batch" }
+hashi-server = { path = "../../../crates/hashi-server" }
