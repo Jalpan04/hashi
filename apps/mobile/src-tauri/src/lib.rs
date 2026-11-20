@@ -2,8 +2,10 @@ use base64::Engine;
 use hashi_core::{
     Book, BookProgress, CreateIdeaInput, CreateMealInput, CreateVoiceInput, CreateWorkoutInput,
     Database, Habit, HabitWithStatus, HealthSnapshot, HomeSnapshot, Idea, IdeaRevision,
-    LogReadingInput, Meal, ReadingLog, StorageStats, UpdateIdeaInput, VoiceJournalEntry, Workout,
+    LogReadingInput, Meal, PairingBundle, PairingStatus, ReadingLog, StorageStats, UpdateIdeaInput,
+    VoiceJournalEntry, Workout,
 };
+use hashi_server::SyncSummary;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
@@ -267,6 +269,116 @@ fn get_storage_stats(state: State<'_, AppState>) -> Result<StorageStats, String>
     db.get_storage_stats().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_pairing_status(state: State<'_, AppState>) -> Result<PairingStatus, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.get_pairing_status().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn clear_pairing(state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.clear_pairing().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn pair_with_qr(state: State<'_, AppState>, qr_payload: String) -> Result<String, String> {
+    let bundle = PairingBundle::from_qr_string(&qr_payload)
+        .map_err(|e| format!("Invalid pairing QR code: {}", e))?;
+
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let device_id = db.device_id().to_string();
+
+    let mut paired_addr = None;
+
+    for host in &bundle.host_ips {
+        let addr = format!("{}:{}", host, bundle.port);
+        if hashi_server::pair_with_peer(&addr, &device_id, &bundle.secret, "phone").is_ok() {
+            paired_addr = Some(addr);
+            break;
+        }
+    }
+
+    if paired_addr.is_none() {
+        let gw_addr = format!("192.168.43.1:{}", bundle.port);
+        if hashi_server::pair_with_peer(&gw_addr, &device_id, &bundle.secret, "phone").is_ok() {
+            paired_addr = Some(gw_addr);
+        }
+    }
+
+    let final_addr = paired_addr.unwrap_or_else(|| {
+        bundle
+            .host_ips
+            .first()
+            .map(|h| format!("{}:{}", h, bundle.port))
+            .unwrap_or_else(|| format!("192.168.43.1:{}", bundle.port))
+    });
+
+    db.save_pairing(&bundle.device_id, &bundle.secret, Some(&final_addr), "phone")
+        .map_err(|e| e.to_string())?;
+
+    Ok(format!("Paired successfully with PC ({})", bundle.device_id))
+}
+
+#[tauri::command]
+fn pair_manual(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+    secret: String,
+) -> Result<String, String> {
+    let clean_host = host.trim();
+    let addr = format!("{}:{}", clean_host, port);
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let device_id = db.device_id().to_string();
+
+    let peer_res = hashi_server::pair_with_peer(&addr, &device_id, &secret, "phone");
+    let peer_id = match peer_res {
+        Ok(json_str) => serde_json::from_str::<serde_json::Value>(&json_str)
+            .ok()
+            .and_then(|v| {
+                v.get("device_id")
+                    .and_then(|d| d.as_str().map(|s| s.to_string()))
+            })
+            .unwrap_or_else(|| "pc".to_string()),
+        Err(e) => {
+            return Err(format!("Could not connect to {}: {}", addr, e));
+        }
+    };
+
+    db.save_pairing(&peer_id, &secret, Some(&addr), "phone")
+        .map_err(|e| e.to_string())?;
+
+    Ok(format!("Paired successfully with {}", addr))
+}
+
+#[tauri::command]
+fn discover_and_sync(state: State<'_, AppState>) -> Result<SyncSummary, String> {
+    let (secret, saved_peer_addr) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let status = db.get_pairing_status().map_err(|e| e.to_string())?;
+        if !status.is_paired {
+            return Err("Device not paired yet. Please scan the pairing QR code from your PC.".into());
+        }
+        let s = db
+            .get_setting("pairing_secret")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Pairing secret missing".to_string())?;
+        (s, status.peer_address)
+    };
+
+    let target_addr = if let Ok((ip, beacon)) = hashi_server::discover_peer(1500) {
+        format!("{}:{}", ip, beacon.port)
+    } else if let Some(addr) = saved_peer_addr {
+        addr
+    } else {
+        "192.168.43.1:8765".to_string()
+    };
+
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    hashi_server::perform_full_sync(&target_addr, &secret, &db)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -314,6 +426,11 @@ pub fn run() {
             create_workout,
             list_workouts,
             get_storage_stats,
+            get_pairing_status,
+            clear_pairing,
+            pair_with_qr,
+            pair_manual,
+            discover_and_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hashi mobile application");

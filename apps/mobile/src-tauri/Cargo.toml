@@ -12,6 +12,7 @@ tauri-build.workspace = true
 
 [dependencies]
 hashi-core = { path = "../../../crates/hashi-core" }
+hashi-server = { path = "../../../crates/hashi-server" }
 tauri-plugin-hashi-native = { path = "../../../plugins/tauri-plugin-hashi-native" }
 tauri.workspace = true
 serde.workspace = true

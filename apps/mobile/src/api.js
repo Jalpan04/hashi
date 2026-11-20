@@ -75,6 +75,12 @@ export const api = {
   listWorkouts: (date = null) => invoke('list_workouts', { date }),
 
   getStorageStats: () => invoke('get_storage_stats'),
+
+  getPairingStatus: () => invoke('get_pairing_status'),
+  clearPairing: () => invoke('clear_pairing'),
+  pairWithQr: (qrPayload) => invoke('pair_with_qr', { qrPayload }),
+  pairManual: (host, port, secret) => invoke('pair_manual', { host, port, secret }),
+  discoverAndSync: () => invoke('discover_and_sync'),
 };
 
 // -----------------------------------------------------------------------------

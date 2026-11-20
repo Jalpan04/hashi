@@ -27,7 +27,18 @@ import {
   startAudioCapture,
   stopAudioCapture,
 } from './recorder.js';
-import { loadPrefs, refreshAll, refreshIdeas, refreshJournal, S, savePrefs } from './state.js';
+import {
+  clearMobilePairing,
+  loadPrefs,
+  pairManualHost,
+  pairWithQrPayload,
+  refreshAll,
+  refreshIdeas,
+  refreshJournal,
+  S,
+  savePrefs,
+  triggerMobileSync,
+} from './state.js';
 
 let activeSheet = null;
 
@@ -739,8 +750,64 @@ function setupEventListeners() {
     }
 
     if (d.action === 'sync-now') {
-      await refreshAll();
+      try {
+        await triggerMobileSync();
+      } catch (e) {
+        console.error('Sync failed:', e);
+      }
       renderActiveSheet();
+      render();
+      return;
+    }
+
+    if (d.action === 'submit-qr-payload') {
+      const input = document.getElementById('qr-input');
+      const payload = input ? input.value.trim() : '';
+      if (payload) {
+        try {
+          await pairWithQrPayload(payload);
+        } catch (e) {
+          console.error('Pairing failed:', e);
+        }
+        renderActiveSheet();
+        render();
+      }
+      return;
+    }
+
+    if (d.action === 'toggle-manual-pairing') {
+      S.pairing.showManual = !S.pairing.showManual;
+      renderActiveSheet();
+      return;
+    }
+
+    if (d.action === 'submit-manual-pairing') {
+      const hostInput = document.getElementById('man-host');
+      const portInput = document.getElementById('man-port');
+      const secretInput = document.getElementById('man-secret');
+      const host = hostInput ? hostInput.value.trim() : '192.168.43.1';
+      const port = portInput ? parseInt(portInput.value.trim(), 10) || 8765 : 8765;
+      const secret = secretInput ? secretInput.value.trim() : '';
+      if (secret) {
+        try {
+          await pairManualHost(host, port, secret);
+        } catch (e) {
+          console.error('Manual pairing failed:', e);
+        }
+        renderActiveSheet();
+        render();
+      }
+      return;
+    }
+
+    if (d.action === 'clear-mobile-pairing') {
+      try {
+        await clearMobilePairing();
+      } catch (e) {
+        console.error('Clear pairing failed:', e);
+      }
+      renderActiveSheet();
+      render();
       return;
     }
 

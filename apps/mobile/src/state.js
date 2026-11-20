@@ -43,6 +43,13 @@ export const S = {
     lastSyncText: 'Not synced yet',
     pcFound: false,
   },
+  pairing: {
+    status: null,
+    isSyncing: false,
+    syncSummary: null,
+    error: null,
+    showManual: false,
+  },
 };
 
 export function loadPrefs() {
@@ -85,6 +92,78 @@ export async function refreshAll() {
   if (health) S.health = health;
   if (Array.isArray(journalEntries)) S.journalEntries = journalEntries;
   if (storage) S.storage = storage;
+
+  await loadPairingStatus();
+}
+
+export async function loadPairingStatus() {
+  try {
+    const status = await api.getPairingStatus();
+    if (status) {
+      S.pairing.status = status;
+      S.syncStatus.pcFound = status.is_paired;
+      if (status.paired_at) {
+        S.syncStatus.lastSyncText = status.paired_at.slice(0, 16).replace('T', ' ');
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load pairing status:', e);
+  }
+}
+
+export async function pairWithQrPayload(payload) {
+  S.pairing.error = null;
+  try {
+    const res = await api.pairWithQr(payload);
+    await loadPairingStatus();
+    await refreshAll();
+    return res;
+  } catch (e) {
+    S.pairing.error = String(e);
+    throw e;
+  }
+}
+
+export async function pairManualHost(host, port, secret) {
+  S.pairing.error = null;
+  try {
+    const res = await api.pairManual(host, port, secret);
+    await loadPairingStatus();
+    await refreshAll();
+    return res;
+  } catch (e) {
+    S.pairing.error = String(e);
+    throw e;
+  }
+}
+
+export async function clearMobilePairing() {
+  S.pairing.error = null;
+  try {
+    await api.clearPairing();
+    await loadPairingStatus();
+    await refreshAll();
+  } catch (e) {
+    S.pairing.error = String(e);
+    throw e;
+  }
+}
+
+export async function triggerMobileSync() {
+  S.pairing.isSyncing = true;
+  S.pairing.error = null;
+  try {
+    const summary = await api.discoverAndSync();
+    S.pairing.syncSummary = summary;
+    S.syncStatus.lastSyncText = 'Just now';
+    await refreshAll();
+    return summary;
+  } catch (e) {
+    S.pairing.error = String(e);
+    throw e;
+  } finally {
+    S.pairing.isSyncing = false;
+  }
 }
 
 export async function refreshIdeas() {
