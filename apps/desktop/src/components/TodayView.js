@@ -74,11 +74,11 @@ export function renderTodayView(filteredEntries, composerHtml) {
         </div>
         <div class="card">
           <div class="lbl">Steps</div>
-          <div class="big">${isToday ? '8,420' : '–'}</div>
+          <div class="big">${isToday ? (S.health?.steps ? S.health.steps.toLocaleString() : '8,420') : '–'}</div>
         </div>
         <div class="card">
           <div class="lbl">Sleep</div>
-          <div class="big">${isToday ? '7h 15m' : '–'}</div>
+          <div class="big">${isToday ? (S.health?.sleepMinutes ? `${Math.floor(S.health.sleepMinutes / 60)}h ${S.health.sleepMinutes % 60}m` : '7h 15m') : '–'}</div>
         </div>
         <div class="card">
           <div class="lbl">Habits</div>

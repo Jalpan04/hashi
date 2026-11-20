@@ -3,17 +3,25 @@ import { ic } from '../icons.js';
 export function renderComposer(comp, photo, rt, sec) {
   if (!comp) return '';
 
-  let h = `<div class="card"><div class="lbl">New ${comp}</div>`;
+  let h = `<div class="card"><div class="lbl">New ${comp === 'note' ? 'idea' : comp}</div>`;
 
   if (comp === 'meal') {
     h += `
       <div class="row2" style="margin-top:0">
-        <div class="th" id="ph" style="cursor:pointer">
+        <div class="th" id="ph" style="cursor:pointer" title="Click to upload image">
           ${photo ? `<img src="${photo}" alt="">` : ic('cam', 24)}
         </div>
         <div style="flex:1;display:grid;gap:10px">
           <input id="nm" placeholder="What did you eat?">
-          <input id="kc" type="number" placeholder="Calories (optional)">
+          <div style="display:flex;gap:8px">
+            <input id="kc" type="number" placeholder="Calories (e.g. 520)" style="flex:1">
+            <select id="mt" style="flex:1;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:inherit;color:var(--tx)">
+              <option value="lunch">Lunch</option>
+              <option value="dinner">Dinner</option>
+              <option value="breakfast">Breakfast</option>
+              <option value="snack">Snack</option>
+            </select>
+          </div>
         </div>
       </div>
       <input type="file" accept="image/*" id="fi" hidden>
@@ -21,7 +29,13 @@ export function renderComposer(comp, photo, rt, sec) {
   }
 
   if (comp === 'note') {
-    h += `<textarea id="tx" rows="3" placeholder="What’s on your mind?"></textarea>`;
+    h += `
+      <div style="display:grid;gap:10px">
+        <input id="ti" placeholder="Title (optional, e.g. Local sync architecture)">
+        <textarea id="tx" rows="3" placeholder="What's on your mind?"></textarea>
+        <input id="tg" placeholder="Tags (comma separated, e.g. architecture, sync)">
+      </div>
+    `;
   }
 
   if (comp === 'voice') {
@@ -43,7 +57,7 @@ export function renderComposer(comp, photo, rt, sec) {
   return (
     h +
     `
-      <div class="row2">
+      <div class="row2" style="margin-top:12px">
         <button class="go" data-s="save">Save</button>
         <button class="ghost" data-s="cancel">Cancel</button>
       </div>

@@ -21,6 +21,20 @@ pub struct UpdateIdeaInput {
     pub title: Option<String>,
     pub raw_text: String,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateManualMealInput {
+    pub meal_type: String,
+    pub user_note: String,
+    pub calories: u32,
+    pub protein: u32,
+    pub carbs: u32,
+    pub fat: u32,
+    pub thumbnail_b64: Option<String>,
+    pub tz_offset_minutes: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,11 +261,17 @@ impl Database {
         let tags_json = serde_json::to_string(&tags)?;
         let next_version = existing.sync.version + 1;
 
+        let status_str = input
+            .status
+            .as_deref()
+            .map(|s| IdeaStatus::from_str(s).as_str().to_string())
+            .unwrap_or_else(|| existing.status.as_str().to_string());
+
         self.conn.execute(
             "UPDATE ideas
-             SET updated_at = ?1, dirty = 1, version = ?2, title = ?3, raw_text = ?4, tags = ?5
-             WHERE id = ?6 AND deleted_at IS NULL",
-            params![now, next_version, title, raw_text, tags_json, input.id],
+             SET updated_at = ?1, dirty = 1, version = ?2, title = ?3, raw_text = ?4, tags = ?5, status = ?6
+             WHERE id = ?7 AND deleted_at IS NULL",
+            params![now, next_version, title, raw_text, tags_json, status_str, input.id],
         )?;
 
         let rev_id = Uuid::new_v4().to_string();
@@ -286,6 +306,26 @@ impl Database {
         }
         self.delete_fts(id)?;
         Ok(())
+    }
+
+    pub fn set_idea_status(&self, id: &str, status: &str) -> CoreResult<Idea> {
+        let existing = self
+            .get_idea(id)?
+            .ok_or_else(|| CoreError::NotFound(id.to_string()))?;
+
+        let status_norm = IdeaStatus::from_str(status).as_str();
+        let now = now_utc();
+        let next_version = existing.sync.version + 1;
+
+        self.conn.execute(
+            "UPDATE ideas
+             SET updated_at = ?1, dirty = 1, version = ?2, status = ?3
+             WHERE id = ?4 AND deleted_at IS NULL",
+            params![now, next_version, status_norm, id],
+        )?;
+
+        self.get_idea(id)?
+            .ok_or_else(|| CoreError::NotFound(id.to_string()))
     }
 
     pub fn list_idea_revisions(&self, idea_id: &str) -> CoreResult<Vec<IdeaRevision>> {
@@ -419,6 +459,45 @@ impl Database {
             out.push(meal);
         }
         Ok(out)
+    }
+
+    pub fn create_manual_meal(&self, input: CreateManualMealInput) -> CoreResult<Meal> {
+        let id = Uuid::new_v4().to_string();
+        let now = now_utc();
+        let meal_type = MealType::from_str(&input.meal_type);
+        let note = input.user_note.trim().to_string();
+
+        self.conn.execute(
+            "INSERT INTO meals (
+                id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                captured_at, tz_offset_minutes, meal_type, photo_path, photo_sha256,
+                thumbnail_b64, user_note, manual_calories, food_items, total_kcal,
+                total_protein, total_carbs, total_fat, confidence, user_edited, status
+            ) VALUES (
+                ?1, ?2, ?2, ?3, 1, NULL, 1,
+                ?2, ?4, ?5, NULL, NULL,
+                ?6, ?7, ?8, '[]', ?8,
+                ?9, ?10, ?11, 1.0, 1, 'processed'
+            )",
+            params![
+                id,
+                now,
+                self.device_id,
+                input.tz_offset_minutes,
+                meal_type.as_str(),
+                input.thumbnail_b64,
+                note,
+                input.calories,
+                input.protein,
+                input.carbs,
+                input.fat,
+            ],
+        )?;
+
+        self.sync_fts(&id, "meal", &note, &format!("{} kcal", input.calories), meal_type.as_str())?;
+
+        self.get_meal(&id)?
+            .ok_or_else(|| CoreError::NotFound(id))
     }
 
     pub fn delete_meal(&self, id: &str) -> CoreResult<()> {
@@ -1177,6 +1256,220 @@ impl Database {
             }
         }
         Ok(())
+    }
+
+    pub fn seed_demo_data_if_empty(&self) -> CoreResult<bool> {
+        self.seed_defaults_if_empty()?;
+
+        let idea_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM ideas WHERE deleted_at IS NULL", [], |r| r.get(0))?;
+        let meal_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM meals WHERE deleted_at IS NULL", [], |r| r.get(0))?;
+
+        if idea_count > 0 || meal_count > 0 {
+            return Ok(false);
+        }
+
+        let now = Utc::now();
+        let today = local_date_from_utc(&now.to_rfc3339(), 330);
+        let _yesterday = local_date_from_utc(&(now - chrono::Duration::days(1)).to_rfc3339(), 330);
+
+        // 1. Seed habit logs for today (Read 20 min and Drink 2L water done)
+        let habits = self.list_habits_for_date(&today)?;
+        for h in habits {
+            if (h.name == "Read 20 minutes" || h.name == "Drink 2L water") && !h.done {
+                let _ = self.toggle_habit_check(&h.id, &today);
+            }
+        }
+
+        // 2. Seed Ideas across Kanban columns (Raw, Incubating, Processed, Merged)
+        let demo_ideas = [
+            (
+                "Habit reordering UX",
+                "Allow drag-and-drop habit reordering with optimistic updates. Store sort_order in SQLite.",
+                vec!["ux", "habits"],
+                "raw",
+            ),
+            (
+                "Dieter Rams principles",
+                "Dieter Rams' principles on unobtrusive tools: good design is as little design as possible. The interface should disappear into the user's daily life.",
+                vec!["design", "philosophy"],
+                "incubating",
+            ),
+            (
+                "Local-first sync architecture",
+                "Move search and indexing to the device. Ship offline mode first before peer-to-peer Wi-Fi sync.",
+                vec!["architecture", "sync"],
+                "processed",
+            ),
+            (
+                "Voice journal compression",
+                "Opus audio at 24kbps produces crystal clear 60s recordings under 180KB.",
+                vec!["audio", "optimization"],
+                "merged",
+            ),
+        ];
+
+        for (title, text, tags, status) in demo_ideas {
+            let idea = self.create_idea(CreateIdeaInput {
+                title: Some(title.into()),
+                raw_text: text.into(),
+                tags: tags.into_iter().map(String::from).collect(),
+                tz_offset_minutes: 330,
+            })?;
+            if status != "raw" {
+                self.set_idea_status(&idea.sync.id, status)?;
+            }
+        }
+
+        // 3. Seed Meals (Today and Yesterday)
+        let demo_meals = [
+            // Today meals
+            ("Oats with banana and chia seeds", 520, 18, 85, 10, "breakfast", 8),
+            ("Chicken wrap and green salad", 680, 42, 60, 20, "lunch", 3),
+            ("Salmon bowl with brown rice and steamed greens", 640, 44, 52, 22, "dinner", 0),
+        ];
+        for (desc, kcal, pro, carbs, fat, mtype, hours_ago) in demo_meals {
+            let cap_time = (now - chrono::Duration::hours(hours_ago)).to_rfc3339();
+            let id = Uuid::new_v4().to_string();
+            self.conn.execute(
+                "INSERT INTO meals (
+                    id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                    captured_at, tz_offset_minutes, meal_type, photo_path, photo_sha256,
+                    thumbnail_b64, user_note, manual_calories, food_items, total_kcal,
+                    total_protein, total_carbs, total_fat, confidence, user_edited, status
+                ) VALUES (
+                    ?1, ?2, ?2, ?3, 1, NULL, 1,
+                    ?2, 330, ?4, NULL, NULL,
+                    NULL, ?5, ?6, '[]', ?6,
+                    ?7, ?8, ?9, 0.95, 1, 'processed'
+                )",
+                params![
+                    id,
+                    cap_time,
+                    self.device_id,
+                    mtype,
+                    desc,
+                    kcal,
+                    pro,
+                    carbs,
+                    fat,
+                ],
+            )?;
+            self.sync_fts(&id, "meal", desc, &format!("{} kcal", kcal), mtype)?;
+        }
+
+        // Yesterday meals
+        let yest_meals = [
+            ("Dal, rice and vegetable sabzi", 720, 24, 110, 18, "lunch", 26),
+            ("Paneer wrap with peppers", 610, 28, 55, 24, "dinner", 20),
+        ];
+        for (desc, kcal, pro, carbs, fat, mtype, hours_ago) in yest_meals {
+            let cap_time = (now - chrono::Duration::hours(hours_ago)).to_rfc3339();
+            let id = Uuid::new_v4().to_string();
+            self.conn.execute(
+                "INSERT INTO meals (
+                    id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                    captured_at, tz_offset_minutes, meal_type, photo_path, photo_sha256,
+                    thumbnail_b64, user_note, manual_calories, food_items, total_kcal,
+                    total_protein, total_carbs, total_fat, confidence, user_edited, status
+                ) VALUES (
+                    ?1, ?2, ?2, ?3, 1, NULL, 1,
+                    ?2, 330, ?4, NULL, NULL,
+                    NULL, ?5, ?6, '[]', ?6,
+                    ?7, ?8, ?9, 0.92, 1, 'processed'
+                )",
+                params![
+                    id,
+                    cap_time,
+                    self.device_id,
+                    mtype,
+                    desc,
+                    kcal,
+                    pro,
+                    carbs,
+                    fat,
+                ],
+            )?;
+            self.sync_fts(&id, "meal", desc, &format!("{} kcal", kcal), mtype)?;
+        }
+
+        // 4. Seed Voice Journal Entry
+        let v_id = Uuid::new_v4().to_string();
+        let v_time = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let bullets = serde_json::to_string(&vec![
+            "Move search to the device",
+            "Ship offline mode first",
+            "Talk to two users this week",
+        ])?;
+        self.conn.execute(
+            "INSERT INTO voice_journal_entries (
+                id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                recorded_at, tz_offset_minutes, duration_seconds, audio_file_path,
+                audio_sha256, transcript, edited_transcript, summary_bullets, status
+            ) VALUES (
+                ?1, ?2, ?2, ?3, 1, NULL, 1,
+                ?2, 330, 48, NULL,
+                NULL, ?4, ?4, ?5, 'processed'
+            )",
+            params![
+                v_id,
+                v_time,
+                self.device_id,
+                "Reflecting on the sync protocol. Moving search to the device was definitely the right choice. Let's make sure offline mode works flawlessly first, then talk to two users this week.",
+                bullets,
+            ],
+        )?;
+        self.sync_fts(&v_id, "voice", "Product roadmap thoughts for the sync feature", "Reflecting on the sync protocol. Moving search to the device was definitely the right choice.", "roadmap sync")?;
+
+        // 5. Seed Reading (Atomic Habits)
+        let b_id = Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO books (id, created_at, updated_at, device_id, dirty, deleted_at, version, title, total_pages, status)
+             VALUES (?1, ?2, ?2, ?3, 1, NULL, 1, 'Atomic Habits', 320, 'reading')",
+            params![b_id, now.to_rfc3339(), self.device_id],
+        )?;
+        self.log_reading(LogReadingInput {
+            book_id: b_id,
+            date: today.clone(),
+            pages_read: 12,
+            minutes_read: 25,
+        })?;
+
+        // 6. Seed Health Metrics
+        let h_id = Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO health_daily_metrics (
+                id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                date, steps, distance_meters, active_calories, sleep_minutes_total,
+                sleep_stages_json, resting_heart_rate, average_heart_rate, source
+            ) VALUES (
+                ?1, ?2, ?2, ?3, 1, NULL, 1,
+                ?4, 8420, 6200.0, 420, 435,
+                NULL, 58, 68, 'health_connect'
+            )",
+            params![h_id, now.to_rfc3339(), self.device_id, today],
+        )?;
+
+        // 7. Seed Workout
+        let w_id = Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO workouts (
+                id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                timestamp, tz_offset_minutes, workout_type, duration_minutes, details_json,
+                notes, source, duplicate_link_id
+            ) VALUES (
+                ?1, ?2, ?2, ?3, 1, NULL, 1,
+                ?2, 330, 'mixed', 32, NULL,
+                'Treadmill intervals: 3 sessions, avg 32m. Progressive overload achieved on dumbbell bench press (24kg x 8 reps).',
+                'manual', NULL
+            )",
+            params![w_id, now.to_rfc3339(), self.device_id],
+        )?;
+
+        Ok(true)
     }
 }
 

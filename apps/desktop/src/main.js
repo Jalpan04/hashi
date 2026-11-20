@@ -10,7 +10,17 @@ import { renderSidebar } from './components/Sidebar.js';
 import { renderTodayView } from './components/TodayView.js';
 import { dateLabel, renderTopbar } from './components/Topbar.js';
 import { ic } from './icons.js';
-import { addEntry, loadState, S, saveState } from './state.js';
+import { api } from './api.js';
+import {
+  addIdea,
+  addMeal,
+  loadLocalSettings,
+  moveIdeaStatus,
+  refreshState,
+  S,
+  saveLocalSettings,
+  toggleHabitByIndex
+} from './state.js';
 
 let comp = null;
 let menuOpen = false;
@@ -42,7 +52,7 @@ export function render() {
   const filtered = S.entries
     .slice()
     .sort((a, b) => b.t - a.t)
-    .filter((e) => !q || e.text.toLowerCase().includes(q));
+    .filter((e) => !q || e.text.toLowerCase().includes(q) || (e.title && e.title.toLowerCase().includes(q)));
 
   const composerHtml = renderComposer(comp, photoData, recordInterval, recordSec);
   const fabHtml = renderFab(menuOpen);
@@ -56,7 +66,7 @@ export function render() {
       viewHtml = renderFoodView(filtered, composerHtml, selectedMeal) + fabHtml;
       break;
     case 'ideas':
-      viewHtml = renderIdeasView(filtered, composerHtml) + fabHtml;
+      viewHtml = renderIdeasView(filtered, composerHtml, S.filterTag) + fabHtml;
       break;
     case 'journal':
       viewHtml = renderJournalView(filtered, composerHtml) + fabHtml;
@@ -91,12 +101,12 @@ function doneComposer() {
 }
 
 function setupEventListeners() {
-  document.addEventListener('click', (ev) => {
+  document.addEventListener('click', async (ev) => {
     const target = ev.target;
     if (!target) return;
 
     const x = target.closest(
-      '[data-c],[data-t],[data-s],[data-h],[data-p],[data-e],[data-filter],[data-theme-val],[data-action],[data-meal-id],#ph,#rc,#pv,#nx'
+      '[data-c],[data-t],[data-s],[data-h],[data-p],[data-e],[data-filter],[data-theme-val],[data-action],[data-meal-id],[data-move-id],[data-delete-idea],#ph,#rc,#pv,#nx'
     );
 
     if (!x) {
@@ -113,11 +123,12 @@ function setupEventListeners() {
       S.tab = d.t;
       comp = null;
       menuOpen = false;
-      saveState();
+      saveLocalSettings();
       render();
     } else if (x.id === 'pv' || x.id === 'nx') {
       S.off += x.id === 'pv' ? -1 : 1;
       if (S.off > 0) S.off = 0;
+      await refreshState();
       render();
     } else if (d.s === 'menu') {
       menuOpen = !menuOpen;
@@ -126,7 +137,7 @@ function setupEventListeners() {
       comp = d.c;
       menuOpen = false;
       if (comp === 'voice' && S.tab !== 'journal' && S.tab !== 'today') S.tab = 'today';
-      if (comp === 'note' && ['health', 'journal', 'private', 'food', 'settings'].includes(S.tab)) S.tab = 'today';
+      if (comp === 'note' && ['health', 'journal', 'private', 'food', 'settings'].includes(S.tab)) S.tab = 'ideas';
       if (comp === 'meal' && S.tab !== 'food' && S.tab !== 'today') S.tab = 'food';
       render();
     } else if (x.id === 'ph') {
@@ -162,45 +173,61 @@ function setupEventListeners() {
       if (comp === 'meal') {
         const nm = document.getElementById('nm')?.value.trim() || 'Meal';
         const kc = +document.getElementById('kc')?.value || 0;
-        addEntry({
-          type: 'meal',
-          text: nm,
-          kcal: kc,
-          pro: Math.round(kc * 0.05),
-          carbs: Math.round(kc * 0.1),
-          fat: Math.round(kc * 0.03),
-          img: photoData || undefined,
-          status: 'waiting'
+        const mt = document.getElementById('mt')?.value || 'lunch';
+        await addMeal({
+          meal_type: mt,
+          user_note: nm,
+          calories: kc,
+          thumbnail_b64: photoData || null
         });
       } else if (comp === 'note') {
+        const ti = document.getElementById('ti')?.value.trim();
         const tx = document.getElementById('tx')?.value.trim();
-        if (!tx) return;
-        addEntry({
-          type: 'note',
-          text: tx,
-          status: 'raw'
+        const tg = document.getElementById('tg')?.value.split(',').map((s) => s.trim()).filter(Boolean);
+        if (!tx && !ti) return;
+        await addIdea({
+          title: ti || null,
+          raw_text: tx || ti,
+          tags: tg || []
         });
       } else if (comp === 'voice') {
         if (!recordSec) return;
-        addEntry({
+        // Mock voice save on desktop
+        S.entries.unshift({
+          id: 'v-' + Date.now(),
           type: 'voice',
-          text: 'Voice note',
+          text: 'Voice note recorded on desktop',
+          t: Date.now(),
           dur: recordSec,
-          status: 'waiting'
+          status: 'processed'
         });
       }
       doneComposer();
-    } else if (d.h !== undefined) {
-      const idx = +d.h;
-      if (S.habits[idx]) {
-        S.habits[idx][1] = S.habits[idx][1] ? 0 : 1;
-        saveState();
-        render();
+    } else if (d.moveId && d.moveTo) {
+      await moveIdeaStatus(d.moveId, d.moveTo);
+      render();
+    } else if (d.deleteIdea) {
+      if (api.isTauri()) {
+        await api.deleteIdea(d.deleteIdea);
+        await refreshState();
+      } else {
+        S.entries = S.entries.filter((e) => e.id !== d.deleteIdea);
       }
+      render();
+    } else if (d.action === 'toggle-ideas-mode') {
+      S.ideasViewMode = d.mode;
+      saveLocalSettings();
+      render();
+    } else if (d.filter) {
+      S.filterTag = d.filter;
+      render();
+    } else if (d.h !== undefined) {
+      await toggleHabitByIndex(+d.h);
+      render();
     } else if (d.p) {
       const btn = x;
       const bar = document.getElementById(`b${d.p}`);
-      const entry = S.entries.find((q) => q.id === +d.p);
+      const entry = S.entries.find((q) => String(q.id) === String(d.p));
       if (!entry) return;
 
       if (btn._t) {
@@ -221,10 +248,10 @@ function setupEventListeners() {
           if (bar) bar.style.width = '0%';
         }
       }, 1000);
-    } else if (d.e && !target.closest('.play')) {
+    } else if (d.e && !target.closest('.play') && !target.closest('button')) {
       x.classList.toggle('open');
     } else if (d.mealId) {
-      selectedMeal = S.entries.find((e) => e.id === +d.mealId) || null;
+      selectedMeal = S.entries.find((e) => String(e.id) === String(d.mealId)) || null;
       render();
     } else if (d.s === 'close-meal-detail') {
       selectedMeal = null;
@@ -237,7 +264,7 @@ function setupEventListeners() {
       render();
     } else if (d.themeVal) {
       S.theme = d.themeVal;
-      saveState();
+      saveLocalSettings();
       applyTheme();
       render();
     }
@@ -258,47 +285,28 @@ function setupEventListeners() {
 
   const qInput = document.getElementById('q');
   if (qInput) {
-    qInput.addEventListener('input', (e) => {
-      searchQuery = e.target.value;
+    qInput.addEventListener('input', (ev) => {
+      searchQuery = ev.target.value.trim();
       render();
-      const currentQ = document.getElementById('q');
-      if (currentQ) {
-        currentQ.value = searchQuery;
-        currentQ.focus();
-      }
     });
   }
-
-  window.addEventListener('keydown', (ev) => {
-    if (ev.ctrlKey && ev.key === 'k') {
-      ev.preventDefault();
-      const input = document.getElementById('q');
-      input?.focus();
-    } else if (ev.ctrlKey && ev.key === 'n') {
-      ev.preventDefault();
-      menuOpen = !menuOpen;
-      render();
-    } else if (ev.key === 'ArrowLeft' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
-      S.off -= 1;
-      render();
-    } else if (ev.key === 'ArrowRight' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
-      if (S.off < 0) {
-        S.off += 1;
-        render();
-      }
-    }
-  });
 }
 
-function init() {
-  loadState();
+export async function init() {
+  loadLocalSettings();
   applyTheme();
 
-  const topEl = document.querySelector('.top');
+  const topEl = document.getElementById('top');
   if (topEl) topEl.innerHTML = renderTopbar();
 
   setupEventListeners();
+
+  await refreshState();
   render();
 }
 
-window.addEventListener('DOMContentLoaded', init);
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}

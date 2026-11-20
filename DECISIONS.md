@@ -86,3 +86,28 @@ Per Section 0: "Screens and controls described in this document that the prototy
    - Two lightweight options avoid installing Android Studio:
      - **GitHub Actions CI (zero local Android install):** Free Ubuntu runners include OpenJDK 17, Android SDK, and Android NDK pre-installed to build and upload downloadable `.apk` artifacts.
      - **Headless Android Command-Line Tools:** Installing only OpenJDK 17 + Google's `commandlinetools` zip + `sdkmanager` (`platform-tools`, `platforms;android-34`, `build-tools;34.0.0`, `ndk`) without the Android Studio IDE.
+
+
+---
+
+## 6. Phase 3 Desktop Real Data Integration Decisions
+
+1. **Database Path & Development Fallback:**
+   - Desktop application defaults to the standard user AppData directory (`%APPDATA%/com.hashi.desktop/hashi.db` or `%APPDATA%/hashi/hashi.db`).
+   - If AppData is inaccessible or restricted in local development, it gracefully falls back to `./dev-data/hashi.db` with an isolated `./dev-data/media` folder.
+
+2. **Automatic Demo Seeding on First Launch:**
+   - When a newly initialized database contains zero ideas and zero meals, `seed_demo_data_if_empty()` populates realistic initial data:
+     - 4 Default habits with today's completed checks ("Read 20 minutes", "Drink 2L water").
+     - 4 Ideas spanning all 4 Kanban columns (Inbox, Incubating, Active, Archive).
+     - 5 Meals spanning today (Breakfast, Lunch, Dinner) and yesterday (Lunch, Dinner) with calories, macronutrients, and meal types.
+     - 1 Voice journal entry with duration, transcript, and key takeaway bullets.
+     - 1 Active book ("Atomic Habits") with today's 25-minute reading log.
+     - Today's health metrics (58 bpm resting HR, 420 active kcal, 8,420 steps, 7h 15m sleep) and recent workout.
+
+3. **Ideas Kanban Board vs. List View:**
+   - The Ideas view supports both a 4-column Kanban board (Inbox, Incubating, Active, Archive) and a filtered List view.
+   - Cards can be moved across statuses directly via move triggers, updating the underlying SQLite `status` and `version` columns.
+
+4. **Desktop Manual Capture:**
+   - Desktop supports manual entry creation for meals (with calories, macros, meal type, and optional image), notes/ideas (with title and tags), habit checklist toggling, and reading progress.

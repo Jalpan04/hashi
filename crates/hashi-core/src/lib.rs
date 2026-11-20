@@ -101,6 +101,7 @@ mod tests {
                     title: Some("Offline sync architecture".into()),
                     raw_text: "Keep captures instant, write SQLite WAL, sync on hotspot.".into(),
                     tags: vec!["dev".into()],
+                    status: None,
                 })
                 .unwrap();
             assert_eq!(updated.sync.version, 2);
