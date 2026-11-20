@@ -195,16 +195,9 @@ export async function downloadAppUpdate() {
   try {
     const apkPath = await api.downloadUpdate();
     S.pairing.updatePath = apkPath;
-    // On Android WebView or browser, also trigger the direct download URL as fallback
-    if (S.pairing.status?.peer_address) {
-      window.location.href = `http://${S.pairing.status.peer_address}/update/apk`;
-    }
     return apkPath;
   } catch (e) {
     S.pairing.updateError = String(e);
-    if (S.pairing.status?.peer_address) {
-      window.location.href = `http://${S.pairing.status.peer_address}/update/apk`;
-    }
   } finally {
     S.pairing.isDownloading = false;
   }

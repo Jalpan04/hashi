@@ -478,7 +478,30 @@ fn download_update(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<
     let apk_path = cache_dir.join("hashi-update.apk");
     fs::write(&apk_path, &resp.body).map_err(|e| format!("Failed to save APK: {}", e))?;
 
+    #[cfg(target_os = "android")]
+    trigger_android_apk_install(&apk_path.to_string_lossy());
+
     Ok(apk_path.to_string_lossy().to_string())
+}
+
+#[cfg(target_os = "android")]
+fn trigger_android_apk_install(apk_path: &str) {
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
+    if let Ok(vm) = vm {
+        if let Ok(mut env) = vm.attach_current_thread() {
+            if let Ok(class) = env.find_class("com/hashi/mobile/MainActivity") {
+                if let Ok(j_str) = env.new_string(apk_path) {
+                    let _ = env.call_static_method(
+                        &class,
+                        "installApk",
+                        "(Ljava/lang/String;)V",
+                        &[jni::objects::JValue::Object(&j_str)],
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
