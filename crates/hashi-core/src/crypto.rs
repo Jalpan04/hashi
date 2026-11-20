@@ -1,3 +1,6 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevicePairingPayload {
     pub device_id: String,
     pub one_time_secret: String,

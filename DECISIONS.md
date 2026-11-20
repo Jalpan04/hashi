@@ -66,3 +66,23 @@ Per Section 0: "Screens and controls described in this document that the prototy
 - No cloud servers, no analytics, no social sharing, no external fonts other than Inter and JetBrains Mono.
 - Single accent color: `#FF5A1F` exclusively.
 - Sentence case copy throughout.
+
+
+---
+
+## 5. Phase 2 Core Storage & Mobile Capture Decisions
+
+1. **SQLite Engine & Migrations (`hashi-core`):**
+   - Uses `rusqlite` with the `bundled` feature (SQLite 3 with WAL mode, foreign keys enabled, and built-in FTS5 virtual table `search_fts` indexing ideas, meals, and transcripts, while permanently excluding the Private vault).
+   - Non-destructive versioned migration runner (`schema_migrations`) flushes WAL (`PRAGMA wal_checkpoint(TRUNCATE)`) and writes an automatic pre-migration backup copy (`<db>.pre_v<n>_<timestamp>.bak`) before applying any schema upgrade on an existing database.
+2. **Timezone Preservation:**
+   - Capture tables (`ideas`, `meals`, `voice_journal_entries`, `workouts`) store timestamps in UTC RFC 3339 plus `tz_offset_minutes` captured at creation time (e.g. `+330` for IST) so dates and times always render in their original local capture timezone even if the device changes timezone.
+3. **Private Log Deferred Until Phase 7:**
+   - Confirmed with owner: Private log persistence is deferred to Phase 7 (SQLCipher encrypted vault) so zero unencrypted private log records are ever written to standard SQLite.
+4. **In-App Private Media Storage & Thumbnails:**
+   - Meal photos are captured in-app via live `getUserMedia` viewfinder (with file-picker fallback if no camera hardware is available) and written atomically via Rust `hashi-core::media` into `<app_data_dir>/media/meals/<uuid>.jpg` with a SHA-256 digest and a compact 200px square JPEG thumbnail stored on the record.
+   - Voice journal recordings use `MediaRecorder` at 32 kbps Opus (`audio/ogg;codecs=opus` or `audio/webm;codecs=opus`), capped at 0:30 with a "Keep going" extension to a hard 1:00 limit, written atomically into `<app_data_dir>/media/audio/<uuid>.<ext>` with SHA-256 verification.
+5. **Building Android APKs Without Android Studio:**
+   - Two lightweight options avoid installing Android Studio:
+     - **GitHub Actions CI (zero local Android install):** Free Ubuntu runners include OpenJDK 17, Android SDK, and Android NDK pre-installed to build and upload downloadable `.apk` artifacts.
+     - **Headless Android Command-Line Tools:** Installing only OpenJDK 17 + Google's `commandlinetools` zip + `sdkmanager` (`platform-tools`, `platforms;android-34`, `build-tools;34.0.0`, `ndk`) without the Android Studio IDE.

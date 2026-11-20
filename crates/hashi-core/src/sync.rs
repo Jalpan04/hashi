@@ -1,6 +1,7 @@
 use crate::models::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncBatch {
     pub device_id: String,
     pub ideas: Vec<Idea>,
@@ -14,7 +15,7 @@ pub struct SyncBatch {
     pub reading_logs: Vec<ReadingLog>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncAck {
     pub confirmed_until: String,
     pub acknowledged_ids: Vec<String>,

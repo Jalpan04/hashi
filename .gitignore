@@ -1,7 +1,12 @@
 target/
 node_modules/
 dist/
+gen/
+.gradle/
+**/.gradle/
 *.log
 sqlite_mcp_server.db
 .DS_Store
 Thumbs.db
+android-tools/
+
