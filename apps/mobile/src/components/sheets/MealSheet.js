@@ -8,7 +8,14 @@ export function getAutoMealType() {
   return 'Dinner';
 }
 
-export function renderMealSheet(capturedPhoto, selectedType, flashMode) {
+export function renderMealSheet({
+  capturedPhoto,
+  selectedType,
+  flashMode,
+  cameraError,
+  noteValue,
+  kcalValue,
+}) {
   const types = ['Breakfast', 'Lunch', 'Dinner', 'Snack'];
   const chipsHtml = types
     .map(
@@ -17,24 +24,29 @@ export function renderMealSheet(capturedPhoto, selectedType, flashMode) {
     )
     .join('');
 
-  const preview = capturedPhoto
-    ? `<img src="${capturedPhoto}" class="viewfinder-preview" alt="Captured food">`
-    : '';
-
-  const viewfinderControls = capturedPhoto
+  const viewfinderBody = capturedPhoto
     ? `
+      <img src="${capturedPhoto}" class="viewfinder-preview" alt="Captured meal">
       <div class="viewfinder-top">
-        <span class="mono" style="color:#FFF">Captured</span>
-        <button class="ghost" id="retake-photo" style="color:#FFF;padding:4px 8px;font-size:13px">Retake</button>
+        <span class="mono" style="color:#FFF;background:rgba(0,0,0,0.5);padding:3px 8px;border-radius:8px">Private storage</span>
+        <button id="retake-photo" style="color:#FFF;background:rgba(0,0,0,0.6);padding:6px 12px;border-radius:10px;font-size:13px">Retake</button>
       </div>
     `
     : `
+      <video id="vf-video" class="viewfinder-preview" autoplay playsinline muted></video>
       <div class="viewfinder-top">
         <button class="flash-chip" id="toggle-flash" style="cursor:pointer">
-          ${ic('flash', 14)} ${flashMode.toUpperCase()}
+          ${ic('flash', 14)} ${flashMode}
         </button>
-        <span class="mono" style="color:rgba(255,255,255,0.7)">CameraX</span>
+        <button class="flash-chip" id="pick-photo-file" style="cursor:pointer">
+          Choose file
+        </button>
       </div>
+      ${
+        cameraError
+          ? `<div style="position:relative;z-index:2;text-align:center;font-size:12px;color:rgba(255,255,255,0.8);padding:0 12px">${cameraError}</div>`
+          : ''
+      }
       <div class="viewfinder-shutter-bar">
         <button class="shutter-btn" id="shutter-btn" aria-label="Take photo">
           <i></i>
@@ -46,22 +58,25 @@ export function renderMealSheet(capturedPhoto, selectedType, flashMode) {
     <div class="sheet" id="sh">
       <div class="top">
         <h1>Meal</h1>
-        <button data-s="close" aria-label="Close">${ic('x')}</button>
+        <button data-s="close" aria-label="Close" style="min-width:44px;min-height:44px;display:grid;place-items:center">${ic('x')}</button>
       </div>
 
       <div class="viewfinder" id="vf">
-        ${preview}
-        ${viewfinderControls}
+        ${viewfinderBody}
       </div>
       <input type="file" accept="image/*" capture="environment" id="fi" hidden>
 
       <div class="lbl" style="margin-left:0">Meal type</div>
       <div class="chips">${chipsHtml}</div>
 
-      <input id="nm" placeholder="What did you eat? (e.g. 200g paneer, 2 rotis)">
-      <input id="kc" type="number" inputmode="numeric" placeholder="Calories (optional)">
+      <input id="nm" placeholder="Note (e.g. 200g paneer, 2 rotis)" value="${escapeAttr(noteValue)}">
+      <input id="kc" type="number" inputmode="numeric" placeholder="Calories (optional)" value="${escapeAttr(kcalValue)}">
 
-      <button class="go" data-s="meal">Save meal</button>
+      <button class="go" data-s="meal">Save</button>
     </div>
   `;
+}
+
+function escapeAttr(val) {
+  return String(val || '').replace(/"/g, '&quot;');
 }

@@ -4,8 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "node scripts/build-dist.mjs",
+    "build": "node scripts/build-dist.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.6"
   }
 }

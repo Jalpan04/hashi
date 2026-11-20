@@ -1,123 +1,102 @@
-function at(h, m, o = 0) {
-  const d = new Date();
-  d.setDate(d.getDate() + o);
-  d.setHours(h, m, 0, 0);
-  return d.getTime();
-}
-
-export const initialEntries = [
-  {
-    id: 1,
-    type: 'voice',
-    text: 'Product roadmap thoughts for the sync feature',
-    t: at(22, 14),
-    dur: 42,
-    pts: [
-      'Move search to the device',
-      'Ship offline mode first',
-      'Talk to two users this week'
-    ],
-    status: 'processed'
-  },
-  {
-    id: 2,
-    type: 'meal',
-    text: 'Salmon bowl with brown rice and greens',
-    t: at(19, 30),
-    kcal: 640,
-    pro: 44,
-    carbs: 52,
-    fat: 22,
-    status: 'processed'
-  },
-  {
-    id: 3,
-    type: 'note',
-    text: 'Dieter Rams’ principles on unobtrusive tools: good design is as little design as possible.',
-    t: at(14, 15),
-    status: 'processed'
-  },
-  {
-    id: 4,
-    type: 'meal',
-    text: 'Chicken wrap and salad',
-    t: at(13, 20),
-    kcal: 680,
-    pro: 42,
-    carbs: 60,
-    fat: 20,
-    status: 'processed'
-  },
-  {
-    id: 5,
-    type: 'meal',
-    text: 'Oats with banana',
-    t: at(8, 30),
-    kcal: 520,
-    pro: 18,
-    carbs: 85,
-    fat: 10,
-    status: 'processed'
-  }
-];
+import { api, dateStrWithOffset, todayDateStr } from './api.js';
 
 export const S = {
   tab: 'home',
-  entries: initialEntries,
-  habits: [
-    ['Read 20 minutes', 1],
-    ['Workout', 0],
-    ['Drink 2L water', 1],
-    ['Meditate', 0]
-  ],
-  reading: {
-    title: 'Atomic Habits',
-    currentPage: 142,
-    totalPages: 320,
-    minutesToday: 25
+  theme: 'system',
+  journalDayOffset: 0,
+  ideasSearch: '',
+  ideasTag: 'all',
+
+  // Hydrated from SQLite via Tauri backend
+  home: {
+    recent: [],
+    calories_today: 0,
+    has_pending_meals: false,
+    steps_today: null,
+    reading_streak_days: 0,
+    habit_streak_days: 0,
+    pending_sync_count: 0,
+  },
+  ideas: [],
+  health: {
+    date: todayDateStr(),
+    calories_today: 0,
+    calorie_target: 2200,
+    protein_today: 0,
+    carbs_today: 0,
+    fat_today: 0,
+    has_pending_meals: false,
+    metrics: null,
+    habits: [],
+    books: [],
+    recent_workouts: [],
+    latest_weekly_report: null,
+  },
+  journalEntries: [],
+  storage: {
+    db_bytes: 0,
+    media_bytes: 0,
+    meal_photo_count: 0,
+    audio_file_count: 0,
   },
   syncStatus: {
-    pendingCount: 2,
-    lastSyncText: 'Today at 07:42 AM',
-    pcFound: true
+    lastSyncText: 'Not synced yet',
+    pcFound: false,
   },
-  theme: 'system'
 };
 
-export function loadState() {
+export function loadPrefs() {
   try {
-    const raw = localStorage.getItem('hashi-mobile-app');
+    const raw = localStorage.getItem('hashi-mobile-prefs');
     if (raw) {
       const parsed = JSON.parse(raw);
-      Object.assign(S, parsed);
+      if (parsed.tab) S.tab = parsed.tab;
+      if (parsed.theme) S.theme = parsed.theme;
     }
-  } catch (e) {}
+  } catch (_) {}
 }
 
-export function saveState() {
+export function savePrefs() {
   try {
-    localStorage.setItem('hashi-mobile-app', JSON.stringify(S));
-  } catch (e) {}
+    localStorage.setItem(
+      'hashi-mobile-prefs',
+      JSON.stringify({ tab: S.tab, theme: S.theme })
+    );
+  } catch (_) {}
 }
 
-export function addEntry(e) {
-  const newEntry = {
-    ...e,
-    id: Date.now(),
-    t: Date.now()
-  };
-  S.entries.unshift(newEntry);
-  S.syncStatus.pendingCount += 1;
-  saveState();
-  return newEntry;
+export async function refreshAll() {
+  const today = todayDateStr();
+  const journalDate = dateStrWithOffset(S.journalDayOffset);
+
+  const [home, ideas, health, journalEntries, storage] = await Promise.all([
+    api.getHomeSnapshot(today),
+    api.listIdeas({
+      search: S.ideasSearch || null,
+      tag: S.ideasTag === 'all' ? null : S.ideasTag,
+    }),
+    api.getHealthSnapshot(today),
+    api.listVoiceJournals(journalDate),
+    api.getStorageStats(),
+  ]);
+
+  if (home) S.home = home;
+  if (Array.isArray(ideas)) S.ideas = ideas;
+  if (health) S.health = health;
+  if (Array.isArray(journalEntries)) S.journalEntries = journalEntries;
+  if (storage) S.storage = storage;
 }
 
-export function kcalTotal() {
-  return S.entries
-    .filter((e) => e.type === 'meal')
-    .reduce((a, e) => a + (e.kcal || 0), 0);
+export async function refreshIdeas() {
+  const ideas = await api.listIdeas({
+    search: S.ideasSearch || null,
+    tag: S.ideasTag === 'all' ? null : S.ideasTag,
+  });
+  if (Array.isArray(ideas)) S.ideas = ideas;
 }
 
-export function streakDays() {
-  return 14 + (S.habits.every((h) => h[1]) ? 1 : 0);
+export async function refreshJournal() {
+  const journalDate = dateStrWithOffset(S.journalDayOffset);
+  const journalEntries = await api.listVoiceJournals(journalDate);
+  if (Array.isArray(journalEntries)) S.journalEntries = journalEntries;
 }

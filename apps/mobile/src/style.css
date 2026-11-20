@@ -74,7 +74,6 @@ button {
   flex-direction: column;
   position: relative;
   overflow: hidden;
-  box-shadow: 0 0 40px rgba(0,0,0,0.06);
 }
 
 header {
@@ -202,6 +201,15 @@ h1 {
   -webkit-line-clamp: unset;
 }
 
+.row-detail {
+  display: none;
+  margin-top: 6px;
+}
+
+.row.open .row-detail {
+  display: block;
+}
+
 .row .mono {
   margin-top: 3px;
 }
@@ -310,7 +318,6 @@ nav button.on {
   border-radius: 24px;
   padding: 13px 20px;
   font-weight: 500;
-  box-shadow: 0 4px 14px rgba(255, 90, 31, 0.25);
   display: flex;
   align-items: center;
   gap: 8px;
