@@ -12,6 +12,7 @@ use std::time::Duration;
 pub struct LanServer {
     pub port: u16,
     running: Arc<AtomicBool>,
+    apk_dir: Option<std::path::PathBuf>,
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
@@ -124,10 +125,17 @@ impl LanServer {
         Self {
             port,
             running: Arc::new(AtomicBool::new(false)),
+            apk_dir: None,
         }
     }
 
+    /// Set directory where hashi-mobile-arm64-debug.apk lives for OTA updates
+    pub fn set_apk_dir(&mut self, dir: std::path::PathBuf) {
+        self.apk_dir = Some(dir);
+    }
+
     pub fn start(&mut self, db: Arc<Mutex<Database>>) -> Result<(), String> {
+        let apk_dir = self.apk_dir.clone();
         let listener = TcpListener::bind(("0.0.0.0", self.port))
             .map_err(|e| format!("Failed to bind TCP port {}: {}", self.port, e))?;
         listener
@@ -137,13 +145,15 @@ impl LanServer {
         let running = Arc::clone(&self.running);
         running.store(true, Ordering::Relaxed);
 
+        let apk_dir_arc: Arc<Option<std::path::PathBuf>> = Arc::new(apk_dir);
         thread::spawn(move || {
             while running.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, peer_addr)) => {
                         let db_clone = Arc::clone(&db);
+                        let apk_clone = Arc::clone(&apk_dir_arc);
                         thread::spawn(move || {
-                            handle_client(&mut stream, peer_addr, db_clone);
+                            handle_client(&mut stream, peer_addr, db_clone, &apk_clone);
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -164,7 +174,7 @@ impl LanServer {
     }
 }
 
-fn handle_client(stream: &mut TcpStream, peer: SocketAddr, db: Arc<Mutex<Database>>) {
+fn handle_client(stream: &mut TcpStream, peer: SocketAddr, db: Arc<Mutex<Database>>, apk_dir: &Option<std::path::PathBuf>) {
     // 1. IP Check: Refuse public networks per Section 5.1
     if !is_private_ip(peer.ip()) {
         send_response(stream, "403 Forbidden", "text/plain", b"Access denied: non-private network", &[]);
@@ -207,17 +217,27 @@ fn handle_client(stream: &mut TcpStream, peer: SocketAddr, db: Arc<Mutex<Databas
                 let db_lock = db.lock().unwrap();
                 // Check if existing secret matches or if server is unpaired
                 let current_secret = db_lock.get_setting("pairing_secret").unwrap_or(None);
-                if let Some(expected) = current_secret {
-                    if expected != p.secret {
+                if let Some(ref expected) = current_secret {
+                    if !p.secret.is_empty() && !expected.is_empty() && expected != &p.secret {
                         send_response(stream, "401 Unauthorized", "text/plain", b"Invalid pairing secret", &[]);
                         return;
                     }
                 }
-                let _ = db_lock.save_pairing(&p.device_id, &p.secret, Some(&peer.to_string()), &p.role);
+                let effective_secret = if !p.secret.is_empty() {
+                    p.secret.clone()
+                } else if let Some(ref exp) = current_secret {
+                    exp.clone()
+                } else {
+                    let new_sec = "hashi-default-secret".to_string();
+                    let _ = db_lock.set_setting("pairing_secret", &new_sec);
+                    new_sec
+                };
+                let _ = db_lock.save_pairing(&p.device_id, &effective_secret, Some(&peer.to_string()), &p.role);
                 let resp = serde_json::json!({
                     "status": "paired",
                     "device_id": db_lock.device_id(),
-                    "role": "pc"
+                    "role": "pc",
+                    "secret": effective_secret
                 });
                 send_response(stream, "200 OK", "application/json", resp.to_string().as_bytes(), &[]);
             }
@@ -372,6 +392,60 @@ fn handle_client(stream: &mut TcpStream, peer: SocketAddr, db: Arc<Mutex<Databas
             send_response(stream, "404 Not Found", "text/plain", b"Media file not found", &[]);
             return;
         }
+    }
+
+    // 10. OTA Update check (GET /update/check) - no auth required, LAN only
+    if req.method == "GET" && req.path == "/update/check" {
+        if let Some(dir) = apk_dir {
+            let apk_path = dir.join("hashi-mobile-arm64-debug.apk");
+            if apk_path.exists() {
+                let meta = std::fs::metadata(&apk_path).ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let modified = meta
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let resp = serde_json::json!({
+                    "available": true,
+                    "size_bytes": size,
+                    "modified_epoch": modified,
+                    "download_url": "/update/apk"
+                });
+                send_response(stream, "200 OK", "application/json", resp.to_string().as_bytes(), &[]);
+                return;
+            }
+        }
+        let resp = serde_json::json!({"available": false});
+        send_response(stream, "200 OK", "application/json", resp.to_string().as_bytes(), &[]);
+        return;
+    }
+
+    // 11. OTA APK download (GET /update/apk) - no auth required, LAN only
+    if req.method == "GET" && req.path == "/update/apk" {
+        if let Some(dir) = apk_dir {
+            let apk_path = dir.join("hashi-mobile-arm64-debug.apk");
+            if apk_path.exists() {
+                match std::fs::read(&apk_path) {
+                    Ok(bytes) => {
+                        send_response(
+                            stream,
+                            "200 OK",
+                            "application/vnd.android.package-archive",
+                            &bytes,
+                            &[("Content-Disposition", "attachment; filename=\"hashi-update.apk\"")],
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        send_response(stream, "500 Internal Error", "text/plain", e.to_string().as_bytes(), &[]);
+                        return;
+                    }
+                }
+            }
+        }
+        send_response(stream, "404 Not Found", "text/plain", b"No APK available for update", &[]);
+        return;
     }
 
     send_response(stream, "404 Not Found", "text/plain", b"Route not found", &[]);

@@ -81,6 +81,8 @@ export const api = {
   pairWithQr: (qrPayload) => invoke('pair_with_qr', { qrPayload }),
   pairManual: (host, port, secret) => invoke('pair_manual', { host, port, secret }),
   discoverAndSync: () => invoke('discover_and_sync'),
+  checkForUpdate: () => invoke('check_for_update'),
+  downloadUpdate: () => invoke('download_update'),
 };
 
 // -----------------------------------------------------------------------------

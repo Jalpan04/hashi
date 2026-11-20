@@ -39,7 +39,7 @@ export function renderSyncSheet() {
           <p style="color:var(--mu);margin:4px 0 10px;font-size:13px">
             Open Settings on your desktop app and copy the pairing payload, or enter the PC's hotspot IP address.
           </p>
-          <textarea id="qr-input" placeholder="Paste pairing payload from desktop Settings here..." style="width:100%;height:68px;border-radius:6px;border:1px solid var(--bd);background:var(--s2);color:var(--tx);padding:8px;font-family:monospace;font-size:12px;margin-bottom:8px;box-sizing:border-box"></textarea>
+          <textarea id="qr-input" placeholder="Paste pairing payload, or enter PC IP (e.g. 10.71.162.203)..." style="width:100%;height:68px;border-radius:6px;border:1px solid var(--bd);background:var(--s2);color:var(--tx);padding:8px;font-family:monospace;font-size:12px;margin-bottom:8px;box-sizing:border-box"></textarea>
           <button class="go" data-action="submit-qr-payload" style="width:100%;margin-bottom:10px">Pair with payload</button>
           
           <button class="ghost" data-action="toggle-manual-pairing" style="width:100%;font-size:13px">
@@ -50,9 +50,9 @@ export function renderSyncSheet() {
             S.pairing.showManual
               ? `
             <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
-              <input id="man-host" placeholder="PC IP (e.g. 192.168.43.1)" value="192.168.43.1" style="border:1px solid var(--bd);background:var(--s2);color:var(--tx);padding:8px;border-radius:6px;font-size:13px">
+              <input id="man-host" placeholder="PC IP (e.g. 10.71.162.203)" value="10.71.162.203" style="border:1px solid var(--bd);background:var(--s2);color:var(--tx);padding:8px;border-radius:6px;font-size:13px">
               <input id="man-port" type="number" placeholder="Port" value="8765" style="border:1px solid var(--bd);background:var(--s2);color:var(--tx);padding:8px;border-radius:6px;font-size:13px">
-              <input id="man-secret" placeholder="Pairing Secret from desktop Settings" style="border:1px solid var(--bd);background:var(--s2);color:var(--tx);padding:8px;border-radius:6px;font-size:13px">
+              <input id="man-secret" placeholder="Pairing Secret (optional)" style="border:1px solid var(--bd);background:var(--s2);color:var(--tx);padding:8px;border-radius:6px;font-size:13px">
               <button class="go" data-action="submit-manual-pairing" style="width:100%">Connect & Pair</button>
             </div>
           `
@@ -100,6 +100,27 @@ export function renderSyncSheet() {
         <button class="go" data-action="sync-now" style="width:100%" ${S.pairing.isSyncing ? 'disabled' : ''}>
           ${S.pairing.isSyncing ? 'Syncing...' : 'Sync now'}
         </button>
+
+        <div class="card" style="margin-top:12px">
+          <div class="lbl">App updates</div>
+          <p style="color:var(--mu);margin:4px 0 10px;font-size:13px">
+            Check for a new version on your PC and install it over LAN.
+          </p>
+          ${S.pairing.updateInfo
+            ? `<div style="font-size:13px;margin-bottom:8px">
+                Update available: ${(S.pairing.updateInfo.size_bytes / 1048576).toFixed(1)} MB
+               </div>
+               <button class="go" data-action="download-update" style="width:100%" ${S.pairing.isDownloading ? 'disabled' : ''}>
+                 ${S.pairing.isDownloading ? 'Downloading...' : 'Download and install update'}
+               </button>`
+            : `<button class="ghost" data-action="check-update" style="width:100%;font-size:13px">
+                 ${S.pairing.isCheckingUpdate ? 'Checking...' : 'Check for updates'}
+               </button>`
+          }
+          ${S.pairing.updateError ? `<div style="color:var(--ac);font-size:12px;margin-top:6px">${S.pairing.updateError}</div>` : ''}
+          ${S.pairing.updatePath ? `<div style="color:#10B981;font-size:12px;margin-top:6px">Update downloaded. Opening installer...</div>` : ''}
+        </div>
+
         <button class="ghost" data-action="clear-mobile-pairing" style="width:100%;font-size:13px;margin-top:8px">
           Unpair laptop
         </button>

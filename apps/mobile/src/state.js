@@ -49,6 +49,11 @@ export const S = {
     syncSummary: null,
     error: null,
     showManual: false,
+    updateInfo: null,
+    updateError: null,
+    updatePath: null,
+    isCheckingUpdate: false,
+    isDownloading: false,
   },
 };
 
@@ -163,6 +168,45 @@ export async function triggerMobileSync() {
     throw e;
   } finally {
     S.pairing.isSyncing = false;
+  }
+}
+
+export async function checkForAppUpdate() {
+  S.pairing.isCheckingUpdate = true;
+  S.pairing.updateError = null;
+  try {
+    const res = await api.checkForUpdate();
+    if (res && res.available) {
+      S.pairing.updateInfo = res;
+    } else {
+      S.pairing.updateInfo = null;
+      S.pairing.updateError = 'App is up to date (no newer APK on server)';
+    }
+  } catch (e) {
+    S.pairing.updateError = String(e);
+  } finally {
+    S.pairing.isCheckingUpdate = false;
+  }
+}
+
+export async function downloadAppUpdate() {
+  S.pairing.isDownloading = true;
+  S.pairing.updateError = null;
+  try {
+    const apkPath = await api.downloadUpdate();
+    S.pairing.updatePath = apkPath;
+    // On Android WebView or browser, also trigger the direct download URL as fallback
+    if (S.pairing.status?.peer_address) {
+      window.location.href = `http://${S.pairing.status.peer_address}/update/apk`;
+    }
+    return apkPath;
+  } catch (e) {
+    S.pairing.updateError = String(e);
+    if (S.pairing.status?.peer_address) {
+      window.location.href = `http://${S.pairing.status.peer_address}/update/apk`;
+    }
+  } finally {
+    S.pairing.isDownloading = false;
   }
 }
 

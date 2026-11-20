@@ -1319,8 +1319,28 @@ impl Database {
         self.set_setting("pairing_secret", &secret)?;
         self.set_setting("pairing_role", role)?;
 
-        let mut host_ips = vec!["127.0.0.1".to_string()];
-        host_ips.push("192.168.43.1".to_string());
+        // Detect real LAN IPs from all network interfaces
+        let mut host_ips = Vec::new();
+        if let Ok(addrs) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            // Trick: connect to a public IP to find the default outbound interface
+            for target in &["8.8.8.8:80", "1.1.1.1:80"] {
+                if addrs.connect(target).is_ok() {
+                    if let Ok(local) = addrs.local_addr() {
+                        let ip = local.ip().to_string();
+                        if !host_ips.contains(&ip) {
+                            host_ips.push(ip);
+                        }
+                    }
+                }
+            }
+        }
+        // Always include common hotspot gateway as fallback
+        if !host_ips.contains(&"192.168.43.1".to_string()) {
+            host_ips.push("192.168.43.1".to_string());
+        }
+        if host_ips.is_empty() {
+            host_ips.push("127.0.0.1".to_string());
+        }
 
         Ok(PairingBundle {
             device_id: self.device_id.clone(),

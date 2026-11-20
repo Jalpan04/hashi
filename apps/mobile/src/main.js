@@ -28,7 +28,9 @@ import {
   stopAudioCapture,
 } from './recorder.js';
 import {
+  checkForAppUpdate,
   clearMobilePairing,
+  downloadAppUpdate,
   loadPrefs,
   pairManualHost,
   pairWithQrPayload,
@@ -785,18 +787,36 @@ function setupEventListeners() {
       const hostInput = document.getElementById('man-host');
       const portInput = document.getElementById('man-port');
       const secretInput = document.getElementById('man-secret');
-      const host = hostInput ? hostInput.value.trim() : '192.168.43.1';
+      const host = hostInput ? hostInput.value.trim() : '10.71.162.203';
       const port = portInput ? parseInt(portInput.value.trim(), 10) || 8765 : 8765;
       const secret = secretInput ? secretInput.value.trim() : '';
-      if (secret) {
-        try {
-          await pairManualHost(host, port, secret);
-        } catch (e) {
-          console.error('Manual pairing failed:', e);
-        }
-        renderActiveSheet();
-        render();
+      try {
+        await pairManualHost(host, port, secret);
+      } catch (e) {
+        console.error('Manual pairing failed:', e);
       }
+      renderActiveSheet();
+      render();
+      return;
+    }
+
+    if (d.action === 'check-update') {
+      try {
+        await checkForAppUpdate();
+      } catch (e) {
+        console.error('Update check failed:', e);
+      }
+      renderActiveSheet();
+      return;
+    }
+
+    if (d.action === 'download-update') {
+      try {
+        await downloadAppUpdate();
+      } catch (e) {
+        console.error('Update download failed:', e);
+      }
+      renderActiveSheet();
       return;
     }
 
