@@ -9,4 +9,7 @@ sqlite_mcp_server.db
 .DS_Store
 Thumbs.db
 android-tools/
+*.apk
+.android/
+apps/mobile/src-tauri/gen/
 
