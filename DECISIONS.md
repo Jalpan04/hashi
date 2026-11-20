@@ -111,3 +111,31 @@ Per Section 0: "Screens and controls described in this document that the prototy
 
 4. **Desktop Manual Capture:**
    - Desktop supports manual entry creation for meals (with calories, macros, meal type, and optional image), notes/ideas (with title and tags), habit checklist toggling, and reading progress.
+
+---
+
+## 7. Phase 4 Pairing and Hotspot Sync Protocol Decisions
+
+1. **Lightweight Networking Architecture (`hashi-server`):**
+   - The embedded server and discovery engine are implemented with zero external HTTP dependencies using `std::net::TcpListener`, `std::net::TcpStream`, and `std::net::UdpSocket`.
+   - Compiles in ~3 seconds with minimal binary footprint while supporting full streaming requests, chunked payloads, and Keep-Alive checks.
+
+2. **Multi-Tier Hotspot Discovery (Section 5.1):**
+   - Implements a resilient 3-tier discovery fallback sequence:
+     1. UDP discovery broadcast beacon probe on port 8765.
+     2. Hotspot subnet fallback: automatically tests the standard mobile hotspot gateway (`192.168.43.1:8765`) and host addresses.
+     3. Manual IP entry: user can directly provide an IP, port, and pairing secret in the mobile sync sheet as a fail-safe against vendor-specific Android multicast/broadcast dropping.
+
+3. **Cryptographic Handshake & Route Authorization:**
+   - Pairing bundle contains the PC device ID, a one-time SHA-256 pairing secret, host IPs, and port.
+   - All `/sync/*` routes enforce strict Bearer authentication using the shared secret. Requests from non-private IP addresses are rejected with HTTP 403.
+
+4. **Two-Way Delta Sync & Conflict Detection (Section 5.2 & 5.3):**
+   - Delta sync tracks `dirty` flags and `last_synced_at` cursor timestamps across all tables (`ideas`, `meals`, `voice_journal_entries`, `habits`, `habit_checks`, `workouts`, `health_daily_metrics`, `books`, `reading_logs`).
+   - For ideas: if both phone and PC edited an idea since last sync, the idea is flagged as `pending_merge` and both local and incoming text are archived in `idea_revisions` for resolution in the nightly batch.
+   - For all other entities: latest `updated_at` wins with tombstone deletion support.
+
+5. **Media Transfer, SHA-256 Checksums, and Safe Local Purge:**
+   - Media files (meal photos and voice journal audio) are transferred individually via `/sync/media/:type/:id` with header checksum verification.
+   - The phone purges raw photos and audio from local disk only after receiving a confirmed acknowledgment from the PC vault, while perpetually retaining the 200px thumbnail and text metadata.
+
