@@ -3,17 +3,20 @@
 use hashi_core::{
     Book, BookProgress, CreateIdeaInput, CreateManualMealInput, CreateWorkoutInput,
     Database, HabitWithStatus, HealthSnapshot, HomeSnapshot, Idea, IdeaRevision,
-    LogReadingInput, Meal, ReadingLog, SearchHit, StorageStats, UpdateIdeaInput,
-    VoiceJournalEntry, Workout,
+    LogReadingInput, Meal, PairingBundle, PairingStatus, ReadingLog, SearchHit,
+    StorageStats, UpdateIdeaInput, VoiceJournalEntry, Workout,
 };
+use hashi_server::{DiscoveryServer, LanServer, SyncSummary};
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 
 pub struct AppState {
-    pub db: Mutex<Database>,
+    pub db: Arc<Mutex<Database>>,
+    pub lan_server: Mutex<Option<LanServer>>,
+    pub discovery_server: Mutex<Option<DiscoveryServer>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -350,6 +353,56 @@ fn seed_demo_data(state: State<'_, AppState>) -> Result<bool, String> {
     db.seed_demo_data_if_empty().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_pairing_bundle(
+    state: State<'_, AppState>,
+    port: Option<u16>,
+) -> Result<PairingBundle, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let p = port.unwrap_or(8765);
+    db.create_pairing_bundle(p, "pc").map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_pairing_status(state: State<'_, AppState>) -> Result<PairingStatus, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.get_pairing_status().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn clear_pairing(state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.clear_pairing().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn trigger_sync_now(state: State<'_, AppState>) -> Result<SyncSummary, String> {
+    let (status, secret) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let status = db.get_pairing_status().map_err(|e| e.to_string())?;
+        if !status.is_paired {
+            return Err("Desktop is not paired with a mobile device yet.".into());
+        }
+        let secret = db
+            .get_setting("pairing_secret")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "No pairing secret found".to_string())?;
+        (status, secret)
+    };
+
+    let target_addr = if let Some(addr) = status.peer_address {
+        addr
+    } else {
+        match hashi_server::discover_peer(1500) {
+            Ok((ip, beacon)) => format!("{}:{}", ip, beacon.port),
+            Err(_) => "192.168.43.1:8765".to_string(),
+        }
+    };
+
+    let db_ref = state.db.lock().map_err(|e| e.to_string())?;
+    hashi_server::perform_full_sync(&target_addr, &secret, &db_ref)
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -358,13 +411,37 @@ fn main() {
             let media_dir = app_dir.join("media");
             let device_id = load_or_create_device_id(&app_dir);
 
-            let db = Database::open(&db_path, &media_dir, device_id)
+            let db = Database::open(&db_path, &media_dir, device_id.clone())
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
             let _ = db.seed_demo_data_if_empty();
 
+            let db_arc = Arc::new(Mutex::new(db));
+
+            // Start LAN HTTP Server on port 8765 (with fallback to 8766)
+            let mut lan = LanServer::new(8765);
+            let mut port_used = 8765;
+            let lan_started = match lan.start(Arc::clone(&db_arc)) {
+                Ok(_) => true,
+                Err(_) => {
+                    let mut fallback_lan = LanServer::new(8766);
+                    if fallback_lan.start(Arc::clone(&db_arc)).is_ok() {
+                        lan = fallback_lan;
+                        port_used = 8766;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+
+            // Start UDP discovery responder
+            let discovery = DiscoveryServer::start(device_id, "pc".into(), port_used).ok();
+
             app.manage(AppState {
-                db: Mutex::new(db),
+                db: db_arc,
+                lan_server: Mutex::new(if lan_started { Some(lan) } else { None }),
+                discovery_server: Mutex::new(discovery),
             });
             Ok(())
         })
@@ -396,6 +473,10 @@ fn main() {
             search,
             get_storage_stats,
             seed_demo_data,
+            get_pairing_bundle,
+            get_pairing_status,
+            clear_pairing,
+            trigger_sync_now,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hashi desktop application");

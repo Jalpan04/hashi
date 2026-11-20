@@ -45,7 +45,14 @@ export const S = {
   ],
   phoneConnected: true,
   theme: 'system',
-  loading: false
+  loading: false,
+  pairing: {
+    bundle: null,
+    status: null,
+    isSyncing: false,
+    syncSummary: null,
+    syncError: null
+  }
 };
 
 export function loadLocalSettings() {
@@ -217,6 +224,9 @@ export async function refreshState() {
         S.workouts = healthSnap.recent_workouts;
       }
     }
+
+    // 6. Load pairing status
+    await loadPairingInfo();
   } catch (err) {
     console.error('Error refreshing state from DB:', err);
   } finally {
@@ -298,6 +308,44 @@ export async function toggleHabitByIndex(idx) {
   }
 
   habit[1] = habit[1] ? 0 : 1;
+}
+
+export async function loadPairingInfo() {
+  if (api.isTauri()) {
+    try {
+      const [status, bundle] = await Promise.all([
+        api.getPairingStatus(),
+        api.getPairingBundle(8765)
+      ]);
+      S.pairing.status = status;
+      S.pairing.bundle = bundle;
+    } catch (e) {
+      console.error('Failed to load pairing info:', e);
+    }
+  }
+}
+
+export async function triggerDesktopSync() {
+  if (api.isTauri()) {
+    S.pairing.isSyncing = true;
+    S.pairing.syncError = null;
+    try {
+      const res = await api.triggerSyncNow();
+      S.pairing.syncSummary = res;
+      await refreshState();
+    } catch (e) {
+      S.pairing.syncError = String(e);
+    } finally {
+      S.pairing.isSyncing = false;
+    }
+  }
+}
+
+export async function clearDesktopPairing() {
+  if (api.isTauri()) {
+    await api.clearPairing();
+    await loadPairingInfo();
+  }
 }
 
 function seedMockState() {

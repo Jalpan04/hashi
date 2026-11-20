@@ -14,12 +14,14 @@ import { api } from './api.js';
 import {
   addIdea,
   addMeal,
+  clearDesktopPairing,
   loadLocalSettings,
   moveIdeaStatus,
   refreshState,
   S,
   saveLocalSettings,
-  toggleHabitByIndex
+  toggleHabitByIndex,
+  triggerDesktopSync
 } from './state.js';
 
 let comp = null;
@@ -262,6 +264,19 @@ function setupEventListeners() {
     } else if (d.action === 'lock-private') {
       S.privateUnlocked = false;
       render();
+    } else if (d.action === 'sync-now') {
+      render();
+      await triggerDesktopSync();
+      render();
+    } else if (d.action === 'clear-pairing') {
+      await clearDesktopPairing();
+      render();
+    } else if (d.action === 'copy-qr-bundle') {
+      const payload = decodeURIComponent(d.payload || '');
+      if (payload && navigator.clipboard) {
+        navigator.clipboard.writeText(payload);
+        alert('Pairing payload copied to clipboard.');
+      }
     } else if (d.themeVal) {
       S.theme = d.themeVal;
       saveLocalSettings();

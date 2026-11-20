@@ -186,4 +186,32 @@ export const api = {
     }
     return null;
   },
+
+  async getPairingBundle(port = 8765) {
+    if (isTauri()) {
+      return await invoke('get_pairing_bundle', { port });
+    }
+    return null;
+  },
+
+  async getPairingStatus() {
+    if (isTauri()) {
+      return await invoke('get_pairing_status');
+    }
+    return null;
+  },
+
+  async clearPairing() {
+    if (isTauri()) {
+      return await invoke('clear_pairing');
+    }
+    return null;
+  },
+
+  async triggerSyncNow() {
+    if (isTauri()) {
+      return await invoke('trigger_sync_now');
+    }
+    return null;
+  },
 };
