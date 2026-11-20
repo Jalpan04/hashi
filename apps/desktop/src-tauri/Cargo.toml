@@ -10,7 +10,7 @@ tauri-build.workspace = true
 hashi-core = { path = "../../../crates/hashi-core" }
 hashi-batch = { path = "../../../crates/hashi-batch" }
 hashi-server = { path = "../../../crates/hashi-server" }
-tauri.workspace = true
+tauri = { workspace = true, features = ["custom-protocol"] }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

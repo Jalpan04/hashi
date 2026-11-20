@@ -1324,6 +1324,8 @@ dependencies = [
  "chrono",
  "hashi-core",
  "hashi-server",
+ "jni",
+ "ndk-context",
  "serde",
  "serde_json",
  "tauri",
