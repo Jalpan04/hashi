@@ -209,6 +209,105 @@ fn handle_client(stream: &mut TcpStream, peer: SocketAddr, db: Arc<Mutex<Databas
         return;
     }
 
+    // 2b. Root Landing Page for Phone Web Browsers
+    if req.method == "GET" && (req.path == "/" || req.path == "/index.html") {
+        let html = r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hashi Server</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0D0F12; color: #F0F2F5; padding: 24px; text-align: center; margin: 0; }
+.card { background: #181B20; border-radius: 12px; padding: 28px 20px; max-width: 360px; margin: 40px auto; border: 1px solid #282C34; box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+.tag { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #10B981; font-weight: 700; margin-bottom: 6px; }
+h1 { margin: 0 0 10px; font-size: 22px; color: #FF5A1F; }
+p { color: #8E95A5; font-size: 13px; line-height: 1.5; margin: 0 0 20px; }
+.btn { display: block; background: #FF5A1F; color: #ffffff; padding: 14px 20px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px; }
+.btn:active { background: #E04D17; }
+.info { margin-top: 24px; padding-top: 16px; border-top: 1px solid #282C34; font-family: monospace; font-size: 12px; color: #8E95A5; text-align: left; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="tag">Online &amp; Connected</div>
+  <h1>Hashi Server</h1>
+  <p>Your laptop sync server is active. Tap below to download the latest Android app update directly.</p>
+  <a class="btn" href="/update/apk">Download App Update (.apk)</a>
+  <div class="info">
+    <div>Server: Active on port 8765</div>
+    <div>Sync: Ready for pairing</div>
+  </div>
+</div>
+</body>
+</html>"#;
+        send_response(stream, "200 OK", "text/html; charset=utf-8", html.as_bytes(), &[]);
+        return;
+    }
+
+    // 2c. OTA Update check (GET /update/check) - no auth required, LAN only
+    if req.method == "GET" && req.path == "/update/check" {
+        let candidate_paths = [
+            std::path::PathBuf::from("hashi-mobile-arm64-debug.apk"),
+            std::path::PathBuf::from("d:/python projects/hashi/hashi-mobile-arm64-debug.apk"),
+            std::path::PathBuf::from("apps/mobile/src-tauri/gen/android/app/build/outputs/apk/arm64/debug/app-arm64-debug.apk"),
+        ];
+        let found = candidate_paths.into_iter().find(|p| p.exists());
+        if let Some(apk_path) = found {
+            let meta = std::fs::metadata(&apk_path).ok();
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified = meta
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let resp = serde_json::json!({
+                "available": true,
+                "size_bytes": size,
+                "modified_epoch": modified,
+                "download_url": "/update/apk"
+            });
+            send_response(stream, "200 OK", "application/json", resp.to_string().as_bytes(), &[("Access-Control-Allow-Origin", "*")]);
+            return;
+        }
+        let resp = serde_json::json!({"available": false});
+        send_response(stream, "200 OK", "application/json", resp.to_string().as_bytes(), &[("Access-Control-Allow-Origin", "*")]);
+        return;
+    }
+
+    // 2d. OTA APK download (GET /update/apk) - no auth required, LAN only
+    if req.method == "GET" && (req.path == "/update/apk" || req.path == "/update/apk/") {
+        let candidate_paths = [
+            std::path::PathBuf::from("hashi-mobile-arm64-debug.apk"),
+            std::path::PathBuf::from("d:/python projects/hashi/hashi-mobile-arm64-debug.apk"),
+            std::path::PathBuf::from("apps/mobile/src-tauri/gen/android/app/build/outputs/apk/arm64/debug/app-arm64-debug.apk"),
+        ];
+        let found = candidate_paths.into_iter().find(|p| p.exists());
+        if let Some(apk_path) = found {
+            match std::fs::read(&apk_path) {
+                Ok(bytes) => {
+                    send_response(
+                        stream,
+                        "200 OK",
+                        "application/vnd.android.package-archive",
+                        &bytes,
+                        &[
+                            ("Content-Disposition", "attachment; filename=\"hashi-update.apk\""),
+                            ("Access-Control-Allow-Origin", "*"),
+                        ],
+                    );
+                    return;
+                }
+                Err(e) => {
+                    send_response(stream, "500 Internal Error", "text/plain", e.to_string().as_bytes(), &[]);
+                    return;
+                }
+            }
+        }
+        send_response(stream, "404 Not Found", "text/plain", b"No APK available for update", &[]);
+        return;
+    }
+
     // 3. Pairing handshake
     if req.method == "POST" && req.path == "/pair" {
         let payload: Result<PairingHandshakeRequest, _> = serde_json::from_slice(&req.body);
@@ -250,20 +349,22 @@ fn handle_client(stream: &mut TcpStream, peer: SocketAddr, db: Arc<Mutex<Databas
     }
 
     // 4. Authenticate all /sync/* routes with shared pairing secret
-    let auth = req.header("authorization");
-    let is_authorized = {
-        let db_lock = db.lock().unwrap();
-        if let Ok(Some(secret)) = db_lock.get_setting("pairing_secret") {
-            let expected_bearer = format!("Bearer {}", secret);
-            auth == Some(expected_bearer.as_str()) || auth == Some(secret.as_str())
-        } else {
-            false
-        }
-    };
+    if req.path.starts_with("/sync/") {
+        let auth = req.header("authorization");
+        let is_authorized = {
+            let db_lock = db.lock().unwrap();
+            if let Ok(Some(secret)) = db_lock.get_setting("pairing_secret") {
+                let expected_bearer = format!("Bearer {}", secret);
+                auth == Some(expected_bearer.as_str()) || auth == Some(secret.as_str())
+            } else {
+                false
+            }
+        };
 
-    if !is_authorized {
-        send_response(stream, "401 Unauthorized", "text/plain", b"Unauthorized: peer not paired", &[]);
-        return;
+        if !is_authorized {
+            send_response(stream, "401 Unauthorized", "text/plain", b"Unauthorized: peer not paired", &[]);
+            return;
+        }
     }
 
     // 5. Sync delta extraction (GET /sync/delta)
@@ -392,60 +493,6 @@ fn handle_client(stream: &mut TcpStream, peer: SocketAddr, db: Arc<Mutex<Databas
             send_response(stream, "404 Not Found", "text/plain", b"Media file not found", &[]);
             return;
         }
-    }
-
-    // 10. OTA Update check (GET /update/check) - no auth required, LAN only
-    if req.method == "GET" && req.path == "/update/check" {
-        if let Some(dir) = apk_dir {
-            let apk_path = dir.join("hashi-mobile-arm64-debug.apk");
-            if apk_path.exists() {
-                let meta = std::fs::metadata(&apk_path).ok();
-                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                let modified = meta
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let resp = serde_json::json!({
-                    "available": true,
-                    "size_bytes": size,
-                    "modified_epoch": modified,
-                    "download_url": "/update/apk"
-                });
-                send_response(stream, "200 OK", "application/json", resp.to_string().as_bytes(), &[]);
-                return;
-            }
-        }
-        let resp = serde_json::json!({"available": false});
-        send_response(stream, "200 OK", "application/json", resp.to_string().as_bytes(), &[]);
-        return;
-    }
-
-    // 11. OTA APK download (GET /update/apk) - no auth required, LAN only
-    if req.method == "GET" && req.path == "/update/apk" {
-        if let Some(dir) = apk_dir {
-            let apk_path = dir.join("hashi-mobile-arm64-debug.apk");
-            if apk_path.exists() {
-                match std::fs::read(&apk_path) {
-                    Ok(bytes) => {
-                        send_response(
-                            stream,
-                            "200 OK",
-                            "application/vnd.android.package-archive",
-                            &bytes,
-                            &[("Content-Disposition", "attachment; filename=\"hashi-update.apk\"")],
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        send_response(stream, "500 Internal Error", "text/plain", e.to_string().as_bytes(), &[]);
-                        return;
-                    }
-                }
-            }
-        }
-        send_response(stream, "404 Not Found", "text/plain", b"No APK available for update", &[]);
-        return;
     }
 
     send_response(stream, "404 Not Found", "text/plain", b"Route not found", &[]);
