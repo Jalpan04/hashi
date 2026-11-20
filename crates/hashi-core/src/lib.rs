@@ -11,6 +11,7 @@ pub use db::Database;
 pub use error::{CoreError, CoreResult};
 pub use models::*;
 pub use repo::*;
+pub use sync::*;
 
 #[cfg(test)]
 mod tests {
@@ -276,5 +277,131 @@ mod tests {
         assert!(!sync::detect_conflict(&base, &phone_edit, &base));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn full_hotspot_sync_pairing_and_conflict_resolution() {
+        let pc_dir = temp_dir("sync_pc");
+        let phone_dir = temp_dir("sync_phone");
+
+        let pc_db = Database::open(&pc_dir.join("pc.db"), &pc_dir.join("media"), "pc-device-1").unwrap();
+        let phone_db = Database::open(&phone_dir.join("phone.db"), &phone_dir.join("media"), "phone-device-1").unwrap();
+
+        // 1. QR Pairing handshake
+        let bundle = pc_db.create_pairing_bundle(8765, "pc").unwrap();
+        let qr_string = bundle.to_qr_string().unwrap();
+        let parsed = PairingBundle::from_qr_string(&qr_string).unwrap();
+
+        phone_db.save_pairing(&parsed.device_id, &parsed.secret, Some("192.168.43.1:8765"), "phone").unwrap();
+        assert!(phone_db.get_pairing_status().unwrap().is_paired);
+
+        // 2. Phone captures an idea and meal
+        let phone_idea = phone_db.create_idea(CreateIdeaInput {
+            title: Some("Sync architecture".into()),
+            raw_text: "Initial capture on phone.".into(),
+            tags: vec!["sync".into()],
+            tz_offset_minutes: 330,
+        }).unwrap();
+
+        let _phone_meal = phone_db.create_manual_meal(CreateManualMealInput {
+            meal_type: "lunch".into(),
+            user_note: "Rice and lentils".into(),
+            calories: 600,
+            protein: 20,
+            carbs: 90,
+            fat: 15,
+            thumbnail_b64: None,
+            tz_offset_minutes: 330,
+        }).unwrap();
+
+        // 3. First Delta Sync from Phone to PC
+        let phone_delta = phone_db.extract_delta(None).unwrap();
+        assert_eq!(phone_delta.ideas.len(), 1);
+        assert_eq!(phone_delta.meals.len(), 1);
+
+        let apply_on_pc = pc_db.apply_sync_batch(phone_delta).unwrap();
+        assert_eq!(apply_on_pc.applied_count, 2);
+        assert!(apply_on_pc.conflicts.is_empty());
+
+        phone_db.acknowledge_sync(&apply_on_pc.ack).unwrap();
+
+        // Verify PC has the phone records
+        let pc_ideas = pc_db.list_ideas(None, None, None).unwrap();
+        assert_eq!(pc_ideas.len(), 1);
+        assert_eq!(pc_ideas[0].raw_text, "Initial capture on phone.");
+
+        // 4. Two-Way Concurrent Edit on Same Idea (Conflict)
+        phone_db.update_idea(UpdateIdeaInput {
+            id: phone_idea.sync.id.clone(),
+            title: Some("Sync architecture".into()),
+            raw_text: "Phone edited this note concurrently.".into(),
+            tags: vec!["sync".into()],
+            status: None,
+        }).unwrap();
+
+        pc_db.update_idea(UpdateIdeaInput {
+            id: phone_idea.sync.id.clone(),
+            title: Some("Sync architecture".into()),
+            raw_text: "PC also edited this note on the desktop app.".into(),
+            tags: vec!["sync".into(), "desktop".into()],
+            status: None,
+        }).unwrap();
+
+        // Second Sync: Phone sends its updated delta to PC
+        let phone_delta_2 = phone_db.extract_delta(None).unwrap();
+        let apply_on_pc_2 = pc_db.apply_sync_batch(phone_delta_2).unwrap();
+
+        // Conflict should be flagged!
+        assert_eq!(apply_on_pc_2.conflicts.len(), 1);
+        assert_eq!(apply_on_pc_2.conflicts[0], phone_idea.sync.id);
+
+        let conflicted_idea = pc_db.get_idea(&phone_idea.sync.id).unwrap().unwrap();
+        assert_eq!(conflicted_idea.status.as_str(), "pending_merge");
+
+        // Verify both revisions exist in idea_revisions table
+        let revisions = pc_db.list_idea_revisions(&phone_idea.sync.id).unwrap();
+        assert!(revisions.iter().any(|r| r.rev_type == RevisionType::Phone));
+        assert!(revisions.iter().any(|r| r.rev_type == RevisionType::Pc));
+
+        let _ = fs::remove_dir_all(&pc_dir);
+        let _ = fs::remove_dir_all(&phone_dir);
+    }
+
+    #[test]
+    fn media_sync_and_local_purge() {
+        let phone_dir = temp_dir("media_phone");
+        let phone_db = Database::open(&phone_dir.join("phone.db"), &phone_dir.join("media"), "phone-1").unwrap();
+
+        let fake_photo_bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 5];
+        let meal = phone_db.create_meal(CreateMealInput {
+            meal_type: "dinner".into(),
+            user_note: Some("Big salad".into()),
+            manual_calories: Some(350),
+            photo_bytes: Some(fake_photo_bytes.clone()),
+            photo_ext: Some("jpg".into()),
+            thumbnail_b64: Some("data:image/jpeg;base64,fake-thumb-data".into()),
+            tz_offset_minutes: 330,
+        }).unwrap();
+
+        assert!(meal.photo_path.is_some());
+        let photo_path = phone_dir.join("media").join(meal.photo_path.as_ref().unwrap());
+        assert!(photo_path.exists());
+
+        let pending = phone_db.list_pending_media().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].record_id, meal.sync.id);
+
+        let sha = pending[0].sha256.clone();
+        let purged = phone_db.purge_local_media("meals", &meal.sync.id, &sha).unwrap();
+        assert!(purged);
+
+        assert!(!photo_path.exists());
+
+        let reloaded_meal = phone_db.get_meal(&meal.sync.id).unwrap().unwrap();
+        assert!(reloaded_meal.photo_path.is_none());
+        assert!(reloaded_meal.thumbnail_b64.is_some());
+        assert_eq!(reloaded_meal.user_note.as_deref(), Some("Big salad"));
+
+        let _ = fs::remove_dir_all(&phone_dir);
     }
 }

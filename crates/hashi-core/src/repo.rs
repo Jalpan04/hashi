@@ -2,9 +2,11 @@ use crate::db::Database;
 use crate::error::{CoreError, CoreResult};
 use crate::media::{compute_storage_stats, save_media_file};
 use crate::models::*;
+use crate::sync::*;
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1240,6 +1242,874 @@ impl Database {
             recent_workouts: self.list_workouts(None)?.into_iter().take(10).collect(),
             latest_weekly_report,
         })
+    }
+
+    // -------------------------------------------------------------------------
+    // Pairing & Settings
+    // -------------------------------------------------------------------------
+
+    pub fn get_setting(&self, key: &str) -> CoreResult<Option<String>> {
+        let val: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(val)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> CoreResult<()> {
+        let now = now_utc();
+        self.conn.execute(
+            "INSERT INTO settings (key, value, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
+            params![key, value, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_pairing_status(&self) -> CoreResult<PairingStatus> {
+        let peer_id = self.get_setting("pairing_peer_id")?;
+        let secret = self.get_setting("pairing_secret")?;
+        let addr = self.get_setting("pairing_peer_address")?;
+        let role = self.get_setting("pairing_role")?;
+        let paired_at = self.get_setting("pairing_paired_at")?;
+
+        let is_paired = peer_id.is_some() && secret.is_some();
+        Ok(PairingStatus {
+            is_paired,
+            peer_device_id: peer_id,
+            peer_address: addr,
+            role,
+            paired_at,
+        })
+    }
+
+    pub fn save_pairing(
+        &self,
+        peer_id: &str,
+        secret: &str,
+        address: Option<&str>,
+        role: &str,
+    ) -> CoreResult<()> {
+        let now = now_utc();
+        self.set_setting("pairing_peer_id", peer_id)?;
+        self.set_setting("pairing_secret", secret)?;
+        self.set_setting("pairing_role", role)?;
+        self.set_setting("pairing_paired_at", &now)?;
+        if let Some(addr) = address {
+            self.set_setting("pairing_peer_address", addr)?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_pairing(&self) -> CoreResult<()> {
+        self.conn.execute(
+            "DELETE FROM settings WHERE key LIKE 'pairing_%'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_pairing_bundle(&self, port: u16, role: &str) -> CoreResult<PairingBundle> {
+        let secret = format!("{:x}", sha2::Sha256::digest(format!("{}-{}", self.device_id, now_utc()).as_bytes()));
+        self.set_setting("pairing_secret", &secret)?;
+        self.set_setting("pairing_role", role)?;
+
+        let mut host_ips = vec!["127.0.0.1".to_string()];
+        host_ips.push("192.168.43.1".to_string());
+
+        Ok(PairingBundle {
+            device_id: self.device_id.clone(),
+            role: role.to_string(),
+            secret,
+            port,
+            host_ips,
+            created_at: now_utc(),
+        })
+    }
+
+    // -------------------------------------------------------------------------
+    // Sync Protocol
+    // -------------------------------------------------------------------------
+
+    pub fn extract_delta(&self, since: Option<&str>) -> CoreResult<SyncBatch> {
+        let now = now_utc();
+
+        let mut ideas = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                        tz_offset_minutes, title, raw_text, structured_bullets, tags, status
+                 FROM ideas
+                 WHERE dirty = 1 OR (?1 IS NOT NULL AND updated_at > ?1)",
+            )?;
+            let rows = stmt.query_map(params![since], parse_idea_row)?;
+            for r in rows {
+                ideas.push(r?);
+            }
+        }
+
+        let mut meals = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                        captured_at, tz_offset_minutes, meal_type, photo_path, photo_sha256,
+                        thumbnail_b64, user_note, manual_calories, food_items, total_kcal,
+                        total_protein, total_carbs, total_fat, confidence, user_edited, status
+                 FROM meals
+                 WHERE dirty = 1 OR (?1 IS NOT NULL AND updated_at > ?1)",
+            )?;
+            let rows = stmt.query_map(params![since], parse_meal_row)?;
+            for r in rows {
+                meals.push(r?);
+            }
+        }
+
+        let mut voice_entries = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                        recorded_at, tz_offset_minutes, duration_seconds, audio_file_path,
+                        audio_sha256, transcript, edited_transcript, summary_bullets, status
+                 FROM voice_journal_entries
+                 WHERE dirty = 1 OR (?1 IS NOT NULL AND updated_at > ?1)",
+            )?;
+            let rows = stmt.query_map(params![since], parse_voice_row)?;
+            for r in rows {
+                voice_entries.push(r?);
+            }
+        }
+
+        let mut workouts = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                        timestamp, tz_offset_minutes, workout_type, duration_minutes,
+                        details_json, notes, source, duplicate_link_id
+                 FROM workouts
+                 WHERE dirty = 1 OR (?1 IS NOT NULL AND updated_at > ?1)",
+            )?;
+            let rows = stmt.query_map(params![since], parse_workout_row)?;
+            for r in rows {
+                workouts.push(r?);
+            }
+        }
+
+        let mut health_metrics = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                        date, steps, distance_meters, active_calories, sleep_minutes_total,
+                        sleep_stages_json, resting_heart_rate, average_heart_rate, source
+                 FROM health_daily_metrics
+                 WHERE dirty = 1 OR (?1 IS NOT NULL AND updated_at > ?1)",
+            )?;
+            let rows = stmt.query_map(params![since], parse_health_metrics_row)?;
+            for r in rows {
+                health_metrics.push(r?);
+            }
+        }
+
+        let mut habits = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                        name, schedule, sort_order, archived
+                 FROM habits
+                 WHERE dirty = 1 OR (?1 IS NOT NULL AND updated_at > ?1)",
+            )?;
+            let rows = stmt.query_map(params![since], parse_habit_row)?;
+            for r in rows {
+                habits.push(r?);
+            }
+        }
+
+        let mut habit_checks = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                        habit_id, date, done
+                 FROM habit_checks
+                 WHERE dirty = 1 OR (?1 IS NOT NULL AND updated_at > ?1)",
+            )?;
+            let rows = stmt.query_map(params![since], |row| {
+                let sync = parse_sync_meta(row)?;
+                let done: i32 = row.get(9)?;
+                Ok(HabitCheck {
+                    sync,
+                    habit_id: row.get(7)?,
+                    date: row.get(8)?,
+                    done: done != 0,
+                })
+            })?;
+            for r in rows {
+                habit_checks.push(r?);
+            }
+        }
+
+        let mut books = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                        title, total_pages, status
+                 FROM books
+                 WHERE dirty = 1 OR (?1 IS NOT NULL AND updated_at > ?1)",
+            )?;
+            let rows = stmt.query_map(params![since], parse_book_row)?;
+            for r in rows {
+                books.push(r?);
+            }
+        }
+
+        let mut reading_logs = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                        book_id, date, pages_read, minutes_read
+                 FROM reading_logs
+                 WHERE dirty = 1 OR (?1 IS NOT NULL AND updated_at > ?1)",
+            )?;
+            let rows = stmt.query_map(params![since], |row| {
+                let sync = parse_sync_meta(row)?;
+                Ok(ReadingLog {
+                    sync,
+                    book_id: row.get(7)?,
+                    date: row.get(8)?,
+                    pages_read: row.get(9)?,
+                    minutes_read: row.get(10)?,
+                })
+            })?;
+            for r in rows {
+                reading_logs.push(r?);
+            }
+        }
+
+        Ok(SyncBatch {
+            device_id: self.device_id.clone(),
+            sent_at: now,
+            ideas,
+            voice_entries,
+            meals,
+            workouts,
+            health_metrics,
+            habits,
+            habit_checks,
+            books,
+            reading_logs,
+        })
+    }
+
+    pub fn apply_sync_batch(&self, batch: SyncBatch) -> CoreResult<SyncApplyResult> {
+        let mut applied_ids = Vec::new();
+        let mut conflict_ids = Vec::new();
+        let now = now_utc();
+
+        // 1. Process Ideas with 2-way conflict detection (Section 5.3)
+        for incoming in batch.ideas {
+            let id = incoming.sync.id.clone();
+            let existing = self.get_idea(&id)?;
+
+            match existing {
+                None => {
+                    let tags_json = serde_json::to_string(&incoming.tags)?;
+                    let bullets_json = incoming
+                        .structured_bullets
+                        .as_ref()
+                        .map(|b| serde_json::to_string(b).unwrap_or_default());
+                    self.conn.execute(
+                        "INSERT INTO ideas (
+                            id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                            tz_offset_minutes, title, raw_text, structured_bullets, tags, status
+                        ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        params![
+                            incoming.sync.id,
+                            incoming.sync.created_at,
+                            incoming.sync.updated_at,
+                            incoming.sync.device_id,
+                            incoming.sync.deleted_at,
+                            incoming.sync.version,
+                            incoming.tz_offset_minutes,
+                            incoming.title,
+                            incoming.raw_text,
+                            bullets_json,
+                            tags_json,
+                            incoming.status.as_str(),
+                        ],
+                    )?;
+                    self.sync_fts(
+                        &id,
+                        "idea",
+                        incoming.title.as_deref().unwrap_or(""),
+                        &incoming.raw_text,
+                        &incoming.tags.join(" "),
+                    )?;
+                    applied_ids.push(id);
+                }
+                Some(local) => {
+                    let content_different = local.raw_text.trim() != incoming.raw_text.trim();
+                    let both_edited = local.sync.dirty && content_different;
+
+                    if both_edited {
+                        // CONFLICT! Mark pending_merge and store revisions
+                        conflict_ids.push(id.clone());
+
+                        let rev_phone_id = Uuid::new_v4().to_string();
+                        let rev_pc_id = Uuid::new_v4().to_string();
+
+                        self.conn.execute(
+                            "INSERT INTO idea_revisions (id, idea_id, rev_type, content, timestamp)
+                             VALUES (?1, ?2, 'phone', ?3, ?4)",
+                            params![rev_phone_id, id, incoming.raw_text, incoming.sync.updated_at],
+                        )?;
+
+                        self.conn.execute(
+                            "INSERT INTO idea_revisions (id, idea_id, rev_type, content, timestamp)
+                             VALUES (?1, ?2, 'pc', ?3, ?4)",
+                            params![rev_pc_id, id, local.raw_text, local.sync.updated_at],
+                        )?;
+
+                        self.conn.execute(
+                            "UPDATE ideas
+                             SET status = 'pending_merge', updated_at = ?1, dirty = 1, version = version + 1
+                             WHERE id = ?2",
+                            params![now, id],
+                        )?;
+                    } else if incoming.sync.version > local.sync.version || incoming.sync.updated_at > local.sync.updated_at {
+                        let tags_json = serde_json::to_string(&incoming.tags)?;
+                        let bullets_json = incoming
+                            .structured_bullets
+                            .as_ref()
+                            .map(|b| serde_json::to_string(b).unwrap_or_default());
+                        self.conn.execute(
+                            "UPDATE ideas
+                             SET updated_at = ?1, dirty = 0, deleted_at = ?2, version = ?3,
+                                 tz_offset_minutes = ?4, title = ?5, raw_text = ?6,
+                                 structured_bullets = ?7, tags = ?8, status = ?9
+                             WHERE id = ?10",
+                            params![
+                                incoming.sync.updated_at,
+                                incoming.sync.deleted_at,
+                                incoming.sync.version,
+                                incoming.tz_offset_minutes,
+                                incoming.title,
+                                incoming.raw_text,
+                                bullets_json,
+                                tags_json,
+                                incoming.status.as_str(),
+                                id,
+                            ],
+                        )?;
+                        self.sync_fts(
+                            &id,
+                            "idea",
+                            incoming.title.as_deref().unwrap_or(""),
+                            &incoming.raw_text,
+                            &incoming.tags.join(" "),
+                        )?;
+                    }
+                    applied_ids.push(id);
+                }
+            }
+        }
+
+        // 2. Process Meals (latest updated_at wins)
+        for incoming in batch.meals {
+            let id = incoming.sync.id.clone();
+            let existing = self.get_meal(&id)?;
+            match existing {
+                None => {
+                    let items_json = serde_json::to_string(&incoming.food_items)?;
+                    self.conn.execute(
+                        "INSERT INTO meals (
+                            id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                            captured_at, tz_offset_minutes, meal_type, photo_path, photo_sha256,
+                            thumbnail_b64, user_note, manual_calories, food_items, total_kcal,
+                            total_protein, total_carbs, total_fat, confidence, user_edited, status
+                        ) VALUES (
+                            ?1, ?2, ?3, ?4, 0, ?5, ?6,
+                            ?7, ?8, ?9, ?10, ?11,
+                            ?12, ?13, ?14, ?15, ?16,
+                            ?17, ?18, ?19, ?20, ?21, ?22
+                        )",
+                        params![
+                            incoming.sync.id,
+                            incoming.sync.created_at,
+                            incoming.sync.updated_at,
+                            incoming.sync.device_id,
+                            incoming.sync.deleted_at,
+                            incoming.sync.version,
+                            incoming.captured_at,
+                            incoming.tz_offset_minutes,
+                            incoming.meal_type.as_str(),
+                            incoming.photo_path,
+                            incoming.photo_sha256,
+                            incoming.thumbnail_b64,
+                            incoming.user_note,
+                            incoming.manual_calories,
+                            items_json,
+                            incoming.total_kcal,
+                            incoming.total_protein,
+                            incoming.total_carbs,
+                            incoming.total_fat,
+                            incoming.confidence,
+                            if incoming.user_edited { 1 } else { 0 },
+                            incoming.status.as_str(),
+                        ],
+                    )?;
+                    self.sync_fts(
+                        &id,
+                        "meal",
+                        incoming.user_note.as_deref().unwrap_or("Meal"),
+                        &format!("{} kcal", incoming.total_kcal),
+                        incoming.meal_type.as_str(),
+                    )?;
+                    applied_ids.push(id);
+                }
+                Some(local) => {
+                    if incoming.sync.version > local.sync.version || incoming.sync.updated_at > local.sync.updated_at {
+                        let items_json = serde_json::to_string(&incoming.food_items)?;
+                        self.conn.execute(
+                            "UPDATE meals
+                             SET updated_at = ?1, dirty = 0, deleted_at = ?2, version = ?3,
+                                 total_kcal = ?4, total_protein = ?5, total_carbs = ?6, total_fat = ?7,
+                                 confidence = ?8, user_edited = ?9, status = ?10, food_items = ?11,
+                                 thumbnail_b64 = COALESCE(?12, thumbnail_b64),
+                                 photo_sha256 = COALESCE(?13, photo_sha256)
+                             WHERE id = ?14",
+                            params![
+                                incoming.sync.updated_at,
+                                incoming.sync.deleted_at,
+                                incoming.sync.version,
+                                incoming.total_kcal,
+                                incoming.total_protein,
+                                incoming.total_carbs,
+                                incoming.total_fat,
+                                incoming.confidence,
+                                if incoming.user_edited { 1 } else { 0 },
+                                incoming.status.as_str(),
+                                items_json,
+                                incoming.thumbnail_b64,
+                                incoming.photo_sha256,
+                                id,
+                            ],
+                        )?;
+                    }
+                    applied_ids.push(id);
+                }
+            }
+        }
+
+        // 3. Process Voice Journals
+        for incoming in batch.voice_entries {
+            let id = incoming.sync.id.clone();
+            let existing = self.get_voice_journal(&id)?;
+            match existing {
+                None => {
+                    let bullets_json = incoming
+                        .summary_bullets
+                        .as_ref()
+                        .map(|b| serde_json::to_string(b).unwrap_or_default());
+                    self.conn.execute(
+                        "INSERT INTO voice_journal_entries (
+                            id, created_at, updated_at, device_id, dirty, deleted_at, version,
+                            recorded_at, tz_offset_minutes, duration_seconds, audio_file_path,
+                            audio_sha256, transcript, edited_transcript, summary_bullets, status
+                        ) VALUES (
+                            ?1, ?2, ?3, ?4, 0, ?5, ?6,
+                            ?7, ?8, ?9, ?10,
+                            ?11, ?12, ?13, ?14, ?15
+                        )",
+                        params![
+                            incoming.sync.id,
+                            incoming.sync.created_at,
+                            incoming.sync.updated_at,
+                            incoming.sync.device_id,
+                            incoming.sync.deleted_at,
+                            incoming.sync.version,
+                            incoming.recorded_at,
+                            incoming.tz_offset_minutes,
+                            incoming.duration_seconds,
+                            incoming.audio_file_path,
+                            incoming.audio_sha256,
+                            incoming.transcript,
+                            incoming.edited_transcript,
+                            bullets_json,
+                            incoming.status.as_str(),
+                        ],
+                    )?;
+                    self.sync_fts(
+                        &id,
+                        "voice",
+                        "Voice Journal",
+                        incoming.transcript.as_deref().unwrap_or(""),
+                        "voice journal",
+                    )?;
+                    applied_ids.push(id);
+                }
+                Some(local) => {
+                    if incoming.sync.version > local.sync.version || incoming.sync.updated_at > local.sync.updated_at {
+                        let bullets_json = incoming
+                            .summary_bullets
+                            .as_ref()
+                            .map(|b| serde_json::to_string(b).unwrap_or_default());
+                        self.conn.execute(
+                            "UPDATE voice_journal_entries
+                             SET updated_at = ?1, dirty = 0, deleted_at = ?2, version = ?3,
+                                 transcript = ?4, edited_transcript = ?5, summary_bullets = ?6, status = ?7
+                             WHERE id = ?8",
+                            params![
+                                incoming.sync.updated_at,
+                                incoming.sync.deleted_at,
+                                incoming.sync.version,
+                                incoming.transcript,
+                                incoming.edited_transcript,
+                                bullets_json,
+                                incoming.status.as_str(),
+                                id,
+                            ],
+                        )?;
+                    }
+                    applied_ids.push(id);
+                }
+            }
+        }
+
+        // 4. Process Habits & Checks
+        for incoming in batch.habits {
+            let id = incoming.sync.id.clone();
+            self.conn.execute(
+                "INSERT INTO habits (id, created_at, updated_at, device_id, dirty, deleted_at, version, name, schedule, sort_order, archived)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    deleted_at = excluded.deleted_at,
+                    version = excluded.version,
+                    name = excluded.name,
+                    sort_order = excluded.sort_order,
+                    archived = excluded.archived
+                 WHERE excluded.version > habits.version OR excluded.updated_at > habits.updated_at",
+                params![
+                    incoming.sync.id,
+                    incoming.sync.created_at,
+                    incoming.sync.updated_at,
+                    incoming.sync.device_id,
+                    incoming.sync.deleted_at,
+                    incoming.sync.version,
+                    incoming.name,
+                    incoming.schedule,
+                    incoming.sort_order,
+                    if incoming.archived { 1 } else { 0 },
+                ],
+            )?;
+            applied_ids.push(id);
+        }
+
+        for incoming in batch.habit_checks {
+            let id = incoming.sync.id.clone();
+            self.conn.execute(
+                "INSERT INTO habit_checks (id, created_at, updated_at, device_id, dirty, deleted_at, version, habit_id, date, done)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(habit_id, date) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    version = excluded.version,
+                    done = excluded.done
+                 WHERE excluded.version > habit_checks.version OR excluded.updated_at > habit_checks.updated_at",
+                params![
+                    incoming.sync.id,
+                    incoming.sync.created_at,
+                    incoming.sync.updated_at,
+                    incoming.sync.device_id,
+                    incoming.sync.deleted_at,
+                    incoming.sync.version,
+                    incoming.habit_id,
+                    incoming.date,
+                    if incoming.done { 1 } else { 0 },
+                ],
+            )?;
+            applied_ids.push(id);
+        }
+
+        // 5. Workouts, Books, Reading logs, Health metrics
+        for incoming in batch.workouts {
+            let id = incoming.sync.id.clone();
+            self.conn.execute(
+                "INSERT INTO workouts (id, created_at, updated_at, device_id, dirty, deleted_at, version, timestamp, tz_offset_minutes, workout_type, duration_minutes, details_json, notes, source, duplicate_link_id)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 ON CONFLICT(id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    deleted_at = excluded.deleted_at,
+                    version = excluded.version
+                 WHERE excluded.version > workouts.version OR excluded.updated_at > workouts.updated_at",
+                params![
+                    incoming.sync.id, incoming.sync.created_at, incoming.sync.updated_at,
+                    incoming.sync.device_id, incoming.sync.deleted_at, incoming.sync.version,
+                    incoming.timestamp, incoming.tz_offset_minutes, incoming.workout_type.as_str(),
+                    incoming.duration_minutes, incoming.details_json, incoming.notes,
+                    incoming.source.as_str(), incoming.duplicate_link_id,
+                ],
+            )?;
+            applied_ids.push(id);
+        }
+
+        for incoming in batch.health_metrics {
+            let id = incoming.sync.id.clone();
+            self.conn.execute(
+                "INSERT INTO health_daily_metrics (id, created_at, updated_at, device_id, dirty, deleted_at, version, date, steps, distance_meters, active_calories, sleep_minutes_total, sleep_stages_json, resting_heart_rate, average_heart_rate, source)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 ON CONFLICT(id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    version = excluded.version,
+                    steps = excluded.steps,
+                    active_calories = excluded.active_calories,
+                    sleep_minutes_total = excluded.sleep_minutes_total,
+                    resting_heart_rate = excluded.resting_heart_rate
+                 WHERE excluded.version > health_daily_metrics.version OR excluded.updated_at > health_daily_metrics.updated_at",
+                params![
+                    incoming.sync.id, incoming.sync.created_at, incoming.sync.updated_at,
+                    incoming.sync.device_id, incoming.sync.deleted_at, incoming.sync.version,
+                    incoming.date, incoming.steps, incoming.distance_meters,
+                    incoming.active_calories, incoming.sleep_minutes_total,
+                    incoming.sleep_stages_json, incoming.resting_heart_rate,
+                    incoming.average_heart_rate, incoming.source,
+                ],
+            )?;
+            applied_ids.push(id);
+        }
+
+        for incoming in batch.books {
+            let id = incoming.sync.id.clone();
+            self.conn.execute(
+                "INSERT INTO books (id, created_at, updated_at, device_id, dirty, deleted_at, version, title, total_pages, status)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    version = excluded.version,
+                    title = excluded.title,
+                    total_pages = excluded.total_pages,
+                    status = excluded.status
+                 WHERE excluded.version > books.version OR excluded.updated_at > books.updated_at",
+                params![
+                    incoming.sync.id, incoming.sync.created_at, incoming.sync.updated_at,
+                    incoming.sync.device_id, incoming.sync.deleted_at, incoming.sync.version,
+                    incoming.title, incoming.total_pages, incoming.status,
+                ],
+            )?;
+            applied_ids.push(id);
+        }
+
+        for incoming in batch.reading_logs {
+            let id = incoming.sync.id.clone();
+            self.conn.execute(
+                "INSERT INTO reading_logs (id, created_at, updated_at, device_id, dirty, deleted_at, version, book_id, date, pages_read, minutes_read)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    version = excluded.version,
+                    pages_read = excluded.pages_read,
+                    minutes_read = excluded.minutes_read
+                 WHERE excluded.version > reading_logs.version OR excluded.updated_at > reading_logs.updated_at",
+                params![
+                    incoming.sync.id, incoming.sync.created_at, incoming.sync.updated_at,
+                    incoming.sync.device_id, incoming.sync.deleted_at, incoming.sync.version,
+                    incoming.book_id, incoming.date, incoming.pages_read, incoming.minutes_read,
+                ],
+            )?;
+            applied_ids.push(id);
+        }
+
+        let total_applied = applied_ids.len();
+        Ok(SyncApplyResult {
+            applied_count: total_applied,
+            conflicts: conflict_ids.clone(),
+            ack: SyncAck {
+                confirmed_until: batch.sent_at,
+                acknowledged_ids: applied_ids,
+                conflicts: conflict_ids,
+            },
+        })
+    }
+
+    pub fn acknowledge_sync(&self, ack: &SyncAck) -> CoreResult<()> {
+        let tables = [
+            "ideas", "meals", "voice_journal_entries", "workouts",
+            "health_daily_metrics", "habits", "habit_checks", "books", "reading_logs",
+        ];
+
+        for id in &ack.acknowledged_ids {
+            if ack.conflicts.contains(id) {
+                continue;
+            }
+            for table in &tables {
+                let _ = self.conn.execute(
+                    &format!("UPDATE {} SET dirty = 0 WHERE id = ?1", table),
+                    params![id],
+                );
+            }
+        }
+
+        self.set_setting("last_synced_at", &ack.confirmed_until)?;
+        Ok(())
+    }
+
+    pub fn list_pending_media(&self) -> CoreResult<Vec<MediaUploadItem>> {
+        let mut list = Vec::new();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, photo_path, photo_sha256 FROM meals WHERE photo_path IS NOT NULL AND deleted_at IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })?;
+        for r in rows {
+            let (id, rel_path, sha_opt) = r?;
+            let full_path = self.media_dir.join(&rel_path);
+            if full_path.exists() {
+                let sha = sha_opt.unwrap_or_else(|| {
+                    if let Ok(bytes) = std::fs::read(&full_path) {
+                        format!("{:x}", sha2::Sha256::digest(&bytes))
+                    } else {
+                        String::new()
+                    }
+                });
+                list.push(MediaUploadItem {
+                    record_id: id,
+                    media_type: "meals".to_string(),
+                    file_path: full_path.to_string_lossy().to_string(),
+                    sha256: sha,
+                });
+            }
+        }
+
+        let mut v_stmt = self.conn.prepare(
+            "SELECT id, audio_file_path, audio_sha256 FROM voice_journal_entries WHERE audio_file_path IS NOT NULL AND deleted_at IS NULL",
+        )?;
+        let v_rows = v_stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+        })?;
+        for r in v_rows {
+            let (id, rel_path, sha_opt) = r?;
+            let full_path = self.media_dir.join(&rel_path);
+            if full_path.exists() {
+                let sha = sha_opt.unwrap_or_else(|| {
+                    if let Ok(bytes) = std::fs::read(&full_path) {
+                        format!("{:x}", sha2::Sha256::digest(&bytes))
+                    } else {
+                        String::new()
+                    }
+                });
+                list.push(MediaUploadItem {
+                    record_id: id,
+                    media_type: "audio".to_string(),
+                    file_path: full_path.to_string_lossy().to_string(),
+                    sha256: sha,
+                });
+            }
+        }
+
+        Ok(list)
+    }
+
+    pub fn purge_local_media(
+        &self,
+        media_type: &str,
+        record_id: &str,
+        confirmed_sha256: &str,
+    ) -> CoreResult<bool> {
+        match media_type {
+            "meals" => {
+                let meal = self.get_meal(record_id)?;
+                if let Some(m) = meal {
+                    if let (Some(rel_path), Some(sha)) = (m.photo_path, m.photo_sha256) {
+                        if sha == confirmed_sha256 {
+                            let full_path = self.media_dir.join(&rel_path);
+                            let _ = std::fs::remove_file(&full_path);
+                            self.conn.execute(
+                                "UPDATE meals SET photo_path = NULL, dirty = 0 WHERE id = ?1",
+                                params![record_id],
+                            )?;
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            "audio" => {
+                let voice = self.get_voice_journal(record_id)?;
+                if let Some(v) = voice {
+                    if let (Some(rel_path), Some(sha)) = (v.audio_file_path, v.audio_sha256) {
+                        if sha == confirmed_sha256 {
+                            let full_path = self.media_dir.join(&rel_path);
+                            let _ = std::fs::remove_file(&full_path);
+                            self.conn.execute(
+                                "UPDATE voice_journal_entries SET audio_file_path = NULL, dirty = 0 WHERE id = ?1",
+                                params![record_id],
+                            )?;
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    pub fn attach_synced_media(
+        &self,
+        media_type: &str,
+        record_id: &str,
+        rel_path: &str,
+        sha256: &str,
+    ) -> CoreResult<()> {
+        if media_type == "meals" {
+            self.conn.execute(
+                "UPDATE meals SET photo_path = ?1, photo_sha256 = ?2, dirty = 0 WHERE id = ?3",
+                params![rel_path, sha256, record_id],
+            )?;
+        } else if media_type == "audio" {
+            self.conn.execute(
+                "UPDATE voice_journal_entries SET audio_file_path = ?1, audio_sha256 = ?2, dirty = 0 WHERE id = ?3",
+                params![rel_path, sha256, record_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn save_incoming_media(
+        &self,
+        media_type: &str,
+        record_id: &str,
+        ext: &str,
+        bytes: &[u8],
+    ) -> CoreResult<String> {
+        let saved = save_media_file(&self.media_dir, media_type, record_id, ext, bytes)?;
+        self.attach_synced_media(media_type, record_id, &saved.relative_path, &saved.sha256)?;
+        Ok(saved.sha256)
+    }
+
+    pub fn read_media_bytes(
+        &self,
+        media_type: &str,
+        record_id: &str,
+    ) -> CoreResult<Option<(Vec<u8>, String)>> {
+        let rel_path = if media_type == "meals" {
+            self.get_meal(record_id)?.and_then(|m| m.photo_path)
+        } else {
+            self.get_voice_journal(record_id)?.and_then(|v| v.audio_file_path)
+        };
+
+        if let Some(rel) = rel_path {
+            let full = self.media_dir.join(&rel);
+            if full.exists() {
+                let bytes = std::fs::read(&full)?;
+                let sha = format!("{:x}", sha2::Sha256::digest(&bytes));
+                return Ok(Some((bytes, sha)));
+            }
+        }
+        Ok(None)
     }
 
     pub fn get_storage_stats(&self) -> CoreResult<StorageStats> {
